@@ -8,7 +8,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -24,55 +23,59 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: stable
-          cache: true
+          cache: false
 
       - name: Show Flutter & Dart versions
         run: |
           flutter --version
           dart --version
 
-      - name: Ensure project in ./app exists
+      - name: Ensure project in ./app exists (no heredoc)
         shell: bash
         run: |
           set -e
           mkdir -p app
           cd app
-          # Если нет pubspec.yaml — создадим минимальный
+
+          # pubspec.yaml — создадим, если отсутствует
           if [ ! -f pubspec.yaml ]; then
-            cat > pubspec.yaml << 'EOF'
-name: bp_logger
-description: BP Logger minimal app
-publish_to: "none"
-environment:
-  sdk: ">=3.3.0 <4.0.0"
-dependencies:
-  flutter:
-    sdk: flutter
-flutter:
-  uses-material-design: true
-EOF
-          fi
-          # Если нет lib/main.dart — создадим болванку
-          mkdir -p lib
-          if [ ! -f lib/main.dart ]; then
-            cat > lib/main.dart << 'EOF'
-import 'package:flutter/material.dart';
-void main() => runApp(const MaterialApp(home: Scaffold(body: Center(child: Text('BP Logger placeholder')))));
-EOF
-          fi
-          # Если нет android-папки — сгенерируем
-          if [ ! -d android ]; then
-            flutter create . --org com.naivefox
+            printf "%s\n" \
+              "name: bp_logger" \
+              "description: BP Logger minimal app" \
+              'publish_to: "none"' \
+              "environment:" \
+              '  sdk: \">=3.3.0 <4.0.0\"' \
+              "dependencies:" \
+              "  flutter:" \
+              "    sdk: flutter" \
+              "flutter:" \
+              "  uses-material-design: true" \
+              > pubspec.yaml
           fi
 
-      - name: Clean caches
+          # lib/main.dart — создадим болванку при отсутствии
+          mkdir -p lib
+          if [ ! -f lib/main.dart ]; then
+            printf "%s\n" \
+              "import 'package:flutter/material.dart';" \
+              "void main() => runApp(const MaterialApp(home: Scaffold(body: Center(child: Text('BP Logger placeholder')))));" \
+              > lib/main.dart
+          fi
+
+          # android/ — сгенерируем, если нет
+          if [ ! -d android ]; then
+            flutter create . --org com.naivefox --project-name bp_logger
+          fi
+
+      - name: Clean caches (Flutter/Gradle)
         shell: bash
         run: |
           set -e
           cd app
           flutter clean
           rm -rf build
-          rm -rf android/.gradle android/build
+          rm -rf ~/.gradle/caches ~/.gradle/wrapper
+          rm -rf android/.gradle
           flutter pub get
 
       - name: Build release APK (verbose)
@@ -80,9 +83,10 @@ EOF
         run: |
           set -e
           cd app
-          sed -i 's|distributionUrl=.*|distributionUrl=https\://services.gradle.org/distributions/gradle-7.6-all.zip|' android/gradle/wrapper/gradle-wrapper.properties || true
+          # Подстрахуем gradle-wrapper
+          sed -i 's|^distributionUrl=.*|distributionUrl=https://services.gradle.org/distributions/gradle-8.7-bin.zip|' android/gradle/wrapper/gradle-wrapper.properties || true
           flutter build apk --release --no-tree-shake-icons -v
-          ls -lah build/app/outputs/flutter-apk/ || echo "APK directory not found"
+          ls -lah build/app/outputs/flutter-apk || true
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
