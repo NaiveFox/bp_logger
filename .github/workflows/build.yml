@@ -1,4 +1,4 @@
-name: Build Android APK (Flutter minimal fixed)
+name: Build Android APK (Flutter hardened)
 
 on:
   workflow_dispatch:
@@ -61,20 +61,33 @@ jobs:
       - name: Pin Gradle/AGP/Kotlin
         shell: bash
         run: |
+          set -e
           touch android/gradle.properties
           grep -q 'android.useAndroidX=true' android/gradle.properties || echo 'android.useAndroidX=true' >> android/gradle.properties
           grep -q 'android.enableJetifier=true' android/gradle.properties || echo 'android.enableJetifier=true' >> android/gradle.properties
           grep -q 'org.gradle.jvmargs=' android/gradle.properties || echo 'org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8' >> android/gradle.properties
+          # Gradle 7.6 (AGP 7.4.2 совместима)
           sed -i 's#distributionUrl=.*#distributionUrl=https\\://services.gradle.org/distributions/gradle-7.6-all.zip#' android/gradle/wrapper/gradle-wrapper.properties || true
+          # Корневой build.gradle → Kotlin/AGP
           if [ -f android/build.gradle ]; then
             perl -0777 -pe "s/ext\\.kotlin_version\\s*=\\s*['\\\"][^'\\\"]+['\\\"]/ext.kotlin_version = '1.8.22'/g" -i android/build.gradle || true
             perl -0777 -pe "s#classpath ['\\\"]com\\.android\\.tools\\.build:gradle:[^'\\\"]+['\\\"]#classpath 'com.android.tools.build:gradle:7.4.2'#g" -i android/build.gradle || true
           fi
           APP_GRADLE="android/app/build.gradle"
-          if ! grep -q "namespace " "$APP_GRADLE"; then
-            perl -0777 -pe "s/android\\s*\\{/android {\n    namespace 'com.naivefox.bp_logger'/;" -i "$APP_GRADLE" || echo "android { namespace 'com.naivefox.bp_logger' }" >> "$APP_GRADLE"
-          fi
-          perl -0777 -pe "s/minSdkVersion\\s+\\d+/minSdkVersion 21/g" -i "$APP_GRADLE" || true
+          # compileSdk / target / min
+          perl -0777 -pe "s/compileSdkVersion\\s+\\d+/compileSdkVersion 34/g" -i "$APP_GRADLE" || true
+          perl -0777 -pe "s/targetSdkVersion\\s+\\d+/targetSdkVersion 34/g" -i "$APP_GRADLE" || true
+          grep -q "compileSdkVersion 34" "$APP_GRADLE" || sed -i "/android {/a \ \ \ \ compileSdkVersion 34" "$APP_GRADLE"
+          # namespace если нет
+          grep -q "namespace " "$APP_GRADLE" || sed -i "/android {/a \ \ \ \ namespace 'com.naivefox.bp_logger'" "$APP_GRADLE"
+          # Java/Kotlin 17 совместимость
+          perl -0777 -pe "s/sourceCompatibility\\s*=\\s*JavaVersion\\.[A-Z_0-9]+/sourceCompatibility = JavaVersion.VERSION_17/g" -i "$APP_GRADLE" || true
+          perl -0777 -pe "s/targetCompatibility\\s*=\\s*JavaVersion\\.[A-Z_0-9]+/targetCompatibility = JavaVersion.VERSION_17/g" -i "$APP_GRADLE" || true
+          grep -q "compileOptions" "$APP_GRADLE" || sed -i "/android {/a \ \ \ \ compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }" "$APP_GRADLE"
+          # kotlinOptions jvmTarget
+          grep -q "kotlinOptions" "$APP_GRADLE" || sed -i "/android {/a \ \ \ \ kotlinOptions { jvmTarget = '17' }" "$APP_GRADLE"
+          # stdlib той же версии Kotlin
+          grep -q "kotlin-stdlib" "$APP_GRADLE" || sed -i "/dependencies {/a \ \ \ implementation \"org.jetbrains.kotlin:kotlin-stdlib-jdk8:\${kotlin_version}\"" "$APP_GRADLE"
 
       - name: flutter pub get
         run: flutter pub get
@@ -87,12 +100,17 @@ jobs:
             | xargs -0 -I {} bash -lc "sed -i -E \"s/kotlin-gradle-plugin:[0-9][0-9.]+/kotlin-gradle-plugin:1.8.22/g; s/ext.kotlin_version\\s*=\\s*'[0-9.]+'/ext.kotlin_version = '1.8.22'/g\" {}" || true
           fi
 
-      - name: Build release APK
-        run: flutter build apk --release --dart-define=CI=true
+      - name: Clean & Build (verbose)
+        shell: bash
+        run: |
+          set -e
+          flutter clean
+          # подробный лог, чтобы видеть первопричину, если вдруг упадёт
+          flutter build apk --release -v --dart-define=CI=true
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: bp_logger-apk
           path: build/app/outputs/flutter-apk/*.apk
-          if-no-files-found: error
+          if-no-files-found: error     
