@@ -23,8 +23,9 @@ jobs:
             echo "import 'package:flutter/material.dart';" > lib/main.dart
             echo "void main() => runApp(const MaterialApp(home: Scaffold(body: Center(child: Text('bp_logger')))));" >> lib/main.dart
           fi
+
           if [ ! -f pubspec.yaml ]; then
-            cat > pubspec.yaml <<EOF
+            cat > pubspec.yaml <<'EOF'
 name: bp_logger
 description: BP Logger minimal app
 publish_to: "none"
@@ -69,7 +70,6 @@ EOF
         shell: bash
         run: |
           set -e
-          # определяем используемый DSL
           APP_GRADLE="android/app/build.gradle"
           APP_KTS="android/app/build.gradle.kts"
 
@@ -89,14 +89,12 @@ EOF
           echo 'android.enableJetifier=true' >> android/gradle.properties
           echo 'org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8' >> android/gradle.properties
 
-          # правим общий build.gradle(.kts)
           if [ -f android/build.gradle ]; then
             sed -i 's/ext.kotlin_version.*/ext.kotlin_version = "1.8.22"/' android/build.gradle || true
           elif [ -f android/build.gradle.kts ]; then
             sed -i 's/kotlin("jvm") version.*/kotlin("jvm") version "1.8.22"/' android/build.gradle.kts || true
           fi
 
-          # правим конкретно app gradle файл
           if [[ "$TARGET_FILE" == *".kts" ]]; then
             sed -i '/android {/a\    compileSdk = 34\n    namespace = "com.naivefox.bp_logger"' "$TARGET_FILE" || true
             sed -i '/compileOptions {/a\        sourceCompatibility = JavaVersion.VERSION_17\n        targetCompatibility = JavaVersion.VERSION_17' "$TARGET_FILE" || true
