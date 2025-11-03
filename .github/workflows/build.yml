@@ -1,4 +1,4 @@
-name: Build Android APK (clean)
+name: Build Android APK (diagnostic)
 
 on:
   push:
@@ -25,74 +25,54 @@ jobs:
           channel: stable
           cache: false
 
-      - name: Show Flutter & Dart versions
+      - name: Doctor
         run: |
           flutter --version
+          flutter doctor -v
           dart --version
 
-      - name: Ensure project in ./app exists (no heredoc)
+      - name: Prepare project
         shell: bash
         run: |
           set -e
-          mkdir -p app
           cd app
-
-          # pubspec.yaml — создадим, если отсутствует
-          if [ ! -f pubspec.yaml ]; then
-            printf "%s\n" \
-              "name: bp_logger" \
-              "description: BP Logger minimal app" \
-              'publish_to: "none"' \
-              "environment:" \
-              '  sdk: \">=3.3.0 <4.0.0\"' \
-              "dependencies:" \
-              "  flutter:" \
-              "    sdk: flutter" \
-              "flutter:" \
-              "  uses-material-design: true" \
-              > pubspec.yaml
-          fi
-
-          # lib/main.dart — создадим болванку при отсутствии
-          mkdir -p lib
-          if [ ! -f lib/main.dart ]; then
-            printf "%s\n" \
-              "import 'package:flutter/material.dart';" \
-              "void main() => runApp(const MaterialApp(home: Scaffold(body: Center(child: Text('BP Logger placeholder')))));" \
-              > lib/main.dart
-          fi
-
-          # android/ — сгенерируем, если нет
+          # гарантируем наличие проекта
           if [ ! -d android ]; then
             flutter create . --org com.naivefox --project-name bp_logger
           fi
-
-      - name: Clean caches (Flutter/Gradle)
-        shell: bash
-        run: |
-          set -e
-          cd app
-          flutter clean
-          rm -rf build
-          rm -rf ~/.gradle/caches ~/.gradle/wrapper
-          rm -rf android/.gradle
           flutter pub get
 
-      - name: Build release APK (verbose)
+          # Gradle wrapper и параметры
+          sed -i 's|^distributionUrl=.*|distributionUrl=https://services.gradle.org/distributions/gradle-8.7-bin.zip|' android/gradle/wrapper/gradle-wrapper.properties || true
+          cat >> android/gradle.properties <<'PROPS'
+org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8
+android.enableR8=false
+android.enableDexingArtifactTransform=false
+PROPS
+
+      - name: Build debug APK (sanity check)
         shell: bash
         run: |
           set -e
           cd app
-          # Подстрахуем gradle-wrapper
-          sed -i 's|^distributionUrl=.*|distributionUrl=https://services.gradle.org/distributions/gradle-8.7-bin.zip|' android/gradle/wrapper/gradle-wrapper.properties || true
-          flutter build apk --release --no-tree-shake-icons -v
+          flutter build apk --debug --no-tree-shake-icons -v
           ls -lah build/app/outputs/flutter-apk || true
 
+      - name: Build release APK (verbose via Gradle)
+        shell: bash
+        run: |
+          set -e
+          cd app/android
+          # Собираем напрямую gradle'м, чтобы увидеть ПЕРВЫЙ root-cause
+          ./gradlew --version
+          ./gradlew assembleRelease --stacktrace --info --no-daemon
+
       - name: Upload artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: bp_logger-apk
           path: |
-            app/build/app/outputs/flutter-apk/app-release.apk
-            app/build/app/outputs/flutter-apk/*.apk
-          if-no-files-found: error
+            app/build/app/outputs/flutter-apk/app-debug.apk
+            app/build/outputs/apk/release/app-release*.apk
+          if-no-files-found: warn
