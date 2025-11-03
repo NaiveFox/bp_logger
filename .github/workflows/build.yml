@@ -1,4 +1,4 @@
-name: Build Android APK (safe version)
+name: Build Android APK (bulletproof)
 
 on:
   workflow_dispatch:
@@ -25,17 +25,17 @@ jobs:
           fi
 
           if [ ! -f pubspec.yaml ]; then
-            printf "%s\n" \
-"name: bp_logger" \
-"description: BP Logger minimal app" \
-"publish_to: 'none'" \
-"environment:" \
-"  sdk: '>=3.3.0 <4.0.0'" \
-"dependencies:" \
-"  flutter:" \
-"    sdk: flutter" \
-"flutter:" \
-"  uses-material-design: true" > pubspec.yaml
+            # FIX: Убрал $' синтаксис для совместимости
+            echo "name: bp_logger" > pubspec.yaml
+            echo "description: BP Logger minimal app" >> pubspec.yaml
+            echo "publish_to: \"none\"" >> pubspec.yaml
+            echo "environment:" >> pubspec.yaml
+            echo "  sdk: \">=3.3.0 <4.0.0\"" >> pubspec.yaml
+            echo "dependencies:" >> pubspec.yaml
+            echo "  flutter:" >> pubspec.yaml
+            echo "    sdk: flutter" >> pubspec.yaml
+            echo "flutter:" >> pubspec.yaml
+            echo "  uses-material-design: true" >> pubspec.yaml
           fi
 
       - name: Set up Java 17
@@ -53,56 +53,74 @@ jobs:
       - name: Flutter doctor
         run: flutter doctor -v
 
-      - name: Ensure Android structure (KTS-safe)
+      - name: Ensure Android structure
         shell: bash
         run: |
           set -e
-          if [ ! -d android/app ]; then
-            echo "Creating Android platform..."
-            rm -rf android || true
-            flutter create . --platforms android --org com.naivefox --project-name bp_logger
+          # IMPROVED: Добавил проверку на случай частичной структуры
+          if [ ! -f android/app/build.gradle ] && [ ! -f android/app/build.gradle.kts ]; then
+            echo "Creating fresh Android structure..."
+            flutter create . --platforms android --org com.naivefox --project-name bp_logger --overwrite
+          else
+            echo "Android structure already exists"
           fi
-          echo "✅ Android folder content:"
-          ls -R android
+          echo "Android structure:"
+          find android/ -name "*.gradle*" -o -name "AndroidManifest.xml" | head -20
 
-      - name: Patch Gradle/AGP/Kotlin (auto detect)
+      - name: Patch Gradle (auto-detect KTS/Groovy)
         shell: bash
         run: |
           set -e
           APP_GRADLE="android/app/build.gradle"
           APP_KTS="android/app/build.gradle.kts"
 
+          # IMPROVED: Более безопасные проверки
           if [ -f "$APP_KTS" ]; then
-            TARGET_FILE="$APP_KTS"
-            echo "Detected Kotlin DSL (.kts)"
+            echo "Kotlin DSL detected - patching $APP_KTS"
+            TF="$APP_KTS"
+            # Более безопасные замены
+            if ! grep -q "compileSdk =" "$TF"; then
+              sed -i '/android[[:space:]]*{/a \    compileSdk = 34' "$TF"
+            fi
+            if ! grep -q "namespace =" "$TF"; then
+              sed -i '/android[[:space:]]*{/a \    namespace = "com.naivefox.bp_logger"' "$TF"
+            fi
+            if ! grep -q "compileOptions" "$TF"; then
+              sed -i '/android[[:space:]]*{/a \    compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }' "$TF"
+            fi
+            if ! grep -q "kotlinOptions" "$TF"; then
+              sed -i '/android[[:space:]]*{/a \    kotlinOptions { jvmTarget = "17" }' "$TF"
+            fi
+            
           elif [ -f "$APP_GRADLE" ]; then
-            TARGET_FILE="$APP_GRADLE"
-            echo "Detected Groovy DSL (.gradle)"
+            echo "Groovy DSL detected - patching $APP_GRADLE"
+            TF="$APP_GRADLE"
+            if ! grep -q "compileSdkVersion" "$TF"; then
+              sed -i '/android[[:space:]]*{/a \    compileSdkVersion 34' "$TF"
+            fi
+            if ! grep -q "namespace" "$TF"; then
+              sed -i '/android[[:space:]]*{/a \    namespace "com.naivefox.bp_logger"' "$TF"
+            fi
+            if ! grep -q "compileOptions" "$TF"; then
+              sed -i '/android[[:space:]]*{/a \    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }' "$TF"
+            fi
+            if ! grep -q "kotlinOptions" "$TF"; then
+              sed -i '/android[[:space:]]*{/a \    kotlinOptions { jvmTarget = "17" }' "$TF"
+            fi
+            
           else
-            echo "❌ Neither build.gradle nor build.gradle.kts found!"
+            echo "ERROR: No app build file found at $APP_GRADLE or $APP_KTS"
+            echo "Available files in android/app/:"
+            ls -la android/app/ 2>/dev/null || echo "android/app/ not found"
             exit 1
           fi
 
+          # gradle.properties
+          mkdir -p android
           touch android/gradle.properties
-          echo 'android.useAndroidX=true' >> android/gradle.properties
-          echo 'android.enableJetifier=true' >> android/gradle.properties
-          echo 'org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8' >> android/gradle.properties
-
-          if [ -f android/build.gradle ]; then
-            sed -i 's/ext.kotlin_version.*/ext.kotlin_version = "1.8.22"/' android/build.gradle || true
-          elif [ -f android/build.gradle.kts ]; then
-            sed -i 's/kotlin("jvm") version.*/kotlin("jvm") version "1.8.22"/' android/build.gradle.kts || true
-          fi
-
-          if [[ "$TARGET_FILE" == *".kts" ]]; then
-            sed -i '/android {/a\    compileSdk = 34\n    namespace = "com.naivefox.bp_logger"' "$TARGET_FILE" || true
-            sed -i '/compileOptions {/a\        sourceCompatibility = JavaVersion.VERSION_17\n        targetCompatibility = JavaVersion.VERSION_17' "$TARGET_FILE" || true
-            sed -i '/dependencies {/a\    implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk8")' "$TARGET_FILE" || true
-          else
-            sed -i '/android {/a\    compileSdkVersion 34\n    namespace "com.naivefox.bp_logger"' "$TARGET_FILE" || true
-            sed -i '/compileOptions {/a\        sourceCompatibility JavaVersion.VERSION_17\n        targetCompatibility JavaVersion.VERSION_17' "$TARGET_FILE" || true
-            sed -i '/dependencies {/a\    implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk8:$kotlin_version"' "$TARGET_FILE" || true
-          fi
+          grep -q 'android.useAndroidX=true' android/gradle.properties || echo 'android.useAndroidX=true' >> android/gradle.properties
+          grep -q 'android.enableJetifier=true' android/gradle.properties || echo 'android.enableJetifier=true' >> android/gradle.properties
+          grep -q 'org.gradle.jvmargs=' android/gradle.properties || echo 'org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8' >> android/gradle.properties
 
       - name: flutter pub get
         run: flutter pub get
