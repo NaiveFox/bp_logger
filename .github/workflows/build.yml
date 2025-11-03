@@ -1,4 +1,4 @@
-name: Build Android APK (Flutter auto-detect DSL)
+name: Build Android APK (safe version)
 
 on:
   workflow_dispatch:
@@ -25,18 +25,17 @@ jobs:
           fi
 
           if [ ! -f pubspec.yaml ]; then
-            cat > pubspec.yaml <<'EOF'
-name: bp_logger
-description: BP Logger minimal app
-publish_to: "none"
-environment:
-  sdk: ">=3.3.0 <4.0.0"
-dependencies:
-  flutter:
-    sdk: flutter
-flutter:
-  uses-material-design: true
-EOF
+            printf "%s\n" \
+"name: bp_logger" \
+"description: BP Logger minimal app" \
+"publish_to: 'none'" \
+"environment:" \
+"  sdk: '>=3.3.0 <4.0.0'" \
+"dependencies:" \
+"  flutter:" \
+"    sdk: flutter" \
+"flutter:" \
+"  uses-material-design: true" > pubspec.yaml
           fi
 
       - name: Set up Java 17
