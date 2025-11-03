@@ -1,16 +1,12 @@
-name: Build Android APK (Flutter, self-healing)
+name: Build Android APK (Flutter minimal)
 
 on:
   workflow_dispatch:
   push:
     branches: [ main ]
-    paths:
-      - "lib/**"
-      - "pubspec.yaml"
-      - ".github/workflows/build.yml"
 
 jobs:
-  android-apk:
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -18,19 +14,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Ensure minimal project skeleton
+      - name: Ensure minimal Flutter project files
         shell: bash
         run: |
-          set -euxo pipefail
+          set -e
           mkdir -p lib
           if [ ! -f lib/main.dart ]; then
-            cat > lib/main.dart <<'EOF'
+            cat > lib/main.dart <<'DART'
 import 'package:flutter/material.dart';
 void main() => runApp(const MaterialApp(home: Scaffold(body: Center(child: Text('bp_logger')))));
-EOF
+DART
           fi
           if [ ! -f pubspec.yaml ]; then
-            cat > pubspec.yaml <<'EOF'
+            cat > pubspec.yaml <<'PUB'
 name: bp_logger
 description: BP Logger minimal app
 publish_to: "none"
@@ -41,7 +37,7 @@ dependencies:
     sdk: flutter
 flutter:
   uses-material-design: true
-EOF
+PUB
           fi
 
       - name: Set up Java 17
@@ -53,7 +49,7 @@ EOF
       - name: Set up Flutter (stable)
         uses: subosito/flutter-action@v2
         with:
-          channel: "stable"
+          channel: stable
           cache: true
 
       - name: Flutter doctor
@@ -62,32 +58,28 @@ EOF
       - name: Create Android folder if missing
         shell: bash
         run: |
-          set -euxo pipefail
+          set -e
           if [ ! -d android ]; then
             flutter create . --org com.naivefox --project-name bp_logger
           fi
 
-      - name: Pin Gradle/AGP/Kotlin and gradle.properties
+      - name: Pin Gradle/AGP/Kotlin
         shell: bash
         run: |
-          set -euxo pipefail
-          mkdir -p android
+          set -e
+          # gradle.properties
           touch android/gradle.properties
           grep -q 'android.useAndroidX=true' android/gradle.properties || echo 'android.useAndroidX=true' >> android/gradle.properties
           grep -q 'android.enableJetifier=true' android/gradle.properties || echo 'android.enableJetifier=true' >> android/gradle.properties
           grep -q 'org.gradle.jvmargs=' android/gradle.properties || echo 'org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8' >> android/gradle.properties
-          # Gradle wrapper → 7.6 (совместим с AGP 7.4.2)
+          # Gradle wrapper 7.6
           sed -i 's#distributionUrl=.*#distributionUrl=https\\://services.gradle.org/distributions/gradle-7.6-all.zip#' android/gradle/wrapper/gradle-wrapper.properties || true
-          # Корневой build.gradle: фиксируем версии
+          # Корневой build.gradle — AGP и Kotlin
           if [ -f android/build.gradle ]; then
-            perl -0777 -pe "s/ext\\.kotlin_version\\s*=\\s*['\\\"][0-9\\.\\-rc]+['\\\"]/ext.kotlin_version = '1.8.22'/g" -i android/build.gradle || true
-            perl -0777 -pe "s/classpath\\s*['\\\"]com\\.android\\.tools\\.build:gradle:[^'\\\"]+['\\\"]/classpath 'com.android.tools.build:gradle:7.4.2'/g" -i android/build.gradle || true
+            perl -0777 -pe "s/ext\\.kotlin_version\\s*=\\s*['\\\"][^'\\\"]+['\\\"]/ext.kotlin_version = '1.8.22'/g" -i android/build.gradle || true
+            perl -0777 -pe "s#classpath ['\\\"]com\\.android\\.tools\\.build:gradle:[^'\\\"]+['\\\"]#classpath 'com.android.tools.build:gradle:7.4.2'#g" -i android/build.gradle || true
           fi
-
-      - name: Ensure namespace and SDK knobs
-        shell: bash
-        run: |
-          set -euxo pipefail
+          # namespace + minSdk
           APP_GRADLE="android/app/build.gradle"
           if ! grep -q "namespace " "$APP_GRADLE"; then
             perl -0777 -pe "s/android\\s*\\{/android {\n    namespace 'com.naivefox.bp_logger'/;" -i "$APP_GRADLE" || echo "android { namespace 'com.naivefox.bp_logger' }" >> "$APP_GRADLE"
@@ -97,19 +89,17 @@ EOF
       - name: flutter pub get
         run: flutter pub get
 
-      - name: Safety net: bump Kotlin plugin inside all downloaded Flutter plugins
+      - name: Bump Kotlin plugin inside ALL Flutter plugins (safety)
         shell: bash
         run: |
-          set -euxo pipefail
+          set -e
           if [ -d "$HOME/.pub-cache" ]; then
             find "$HOME/.pub-cache" -type f -path "*android/build.gradle" -print0 \
-              | xargs -0 -I {} bash -lc "sed -i -E \"s/kotlin-gradle-plugin:[0-9][0-9.]+/kotlin-gradle-plugin:1.8.22/g; s/ext.kotlin_version\\s*=\\s*'[0-9.]+'/ext.kotlin_version = '1.8.22'/g\" {}" || true
+            | xargs -0 -I {} bash -lc "sed -i -E \"s/kotlin-gradle-plugin:[0-9][0-9.]+/kotlin-gradle-plugin:1.8.22/g; s/ext.kotlin_version\\s*=\\s*'[0-9.]+'/ext.kotlin_version = '1.8.22'/g\" {}" || true
           fi
 
-      - name: Build release APK (universal)
-        run: |
-          set -euxo pipefail
-          flutter build apk --release --dart-define=CI=true
+      - name: Build release APK
+        run: flutter build apk --release --dart-define=CI=true
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -117,6 +107,3 @@ EOF
           name: bp_logger-apk
           path: build/app/outputs/flutter-apk/*.apk
           if-no-files-found: error
-
-      - name: Done
-        run: echo "✅ APK built and uploaded."
