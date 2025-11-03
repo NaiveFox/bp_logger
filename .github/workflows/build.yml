@@ -1,42 +1,17 @@
-name: Build Android APK (bulletproof)
+name: Build Android APK (clean)
 
 on:
-  workflow_dispatch:
   push:
-    branches: [ main ]
+    branches: [ "main" ]
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Ensure minimal Flutter project
-        shell: bash
-        run: |
-          set -e
-          mkdir -p lib
-          if [ ! -f lib/main.dart ]; then
-            echo "import 'package:flutter/material.dart';" > lib/main.dart
-            echo "void main() => runApp(const MaterialApp(home: Scaffold(body: Center(child: Text('bp_logger')))));" >> lib/main.dart
-          fi
-
-          if [ ! -f pubspec.yaml ]; then
-            # FIX: Убрал $' синтаксис для совместимости
-            echo "name: bp_logger" > pubspec.yaml
-            echo "description: BP Logger minimal app" >> pubspec.yaml
-            echo "publish_to: \"none\"" >> pubspec.yaml
-            echo "environment:" >> pubspec.yaml
-            echo "  sdk: \">=3.3.0 <4.0.0\"" >> pubspec.yaml
-            echo "dependencies:" >> pubspec.yaml
-            echo "  flutter:" >> pubspec.yaml
-            echo "    sdk: flutter" >> pubspec.yaml
-            echo "flutter:" >> pubspec.yaml
-            echo "  uses-material-design: true" >> pubspec.yaml
-          fi
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -48,89 +23,74 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: stable
-          cache: true
+          cache: false
 
-      - name: Flutter doctor
-        run: flutter doctor -v
+      - name: Show Flutter & Dart versions
+        run: |
+          flutter --version
+          dart --version
 
-      - name: Ensure Android structure
+      - name: Ensure project in ./app exists
         shell: bash
         run: |
           set -e
-          # IMPROVED: Добавил проверку на случай частичной структуры
-          if [ ! -f android/app/build.gradle ] && [ ! -f android/app/build.gradle.kts ]; then
-            echo "Creating fresh Android structure..."
-            flutter create . --platforms android --org com.naivefox --project-name bp_logger --overwrite
-          else
-            echo "Android structure already exists"
+          mkdir -p app
+          cd app
+          # Если нет pubspec.yaml — создадим минимальный
+          if [ ! -f pubspec.yaml ]; then
+            cat > pubspec.yaml <<'YAML'
+name: bp_logger
+description: BP Logger minimal app
+publish_to: "none"
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+dependencies:
+  flutter:
+    sdk: flutter
+flutter:
+  uses-material-design: true
+YAML
           fi
-          echo "Android structure:"
-          find android/ -name "*.gradle*" -o -name "AndroidManifest.xml" | head -20
+          # Если нет lib/main.dart — создадим болванку
+          mkdir -p lib
+          if [ ! -f lib/main.dart ]; then
+            cat > lib/main.dart <<'DART'
+import 'package:flutter/material.dart';
+void main() => runApp(const MaterialApp(home: Scaffold(body: Center(child: Text('BP Logger placeholder')))));
+DART
+          fi
+          # Если нет android-папки — сгенерируем
+          if [ ! -d android ]; then
+            flutter create .
+          fi
 
-      - name: Patch Gradle (auto-detect KTS/Groovy)
+      - name: Clean caches (Flutter/Gradle) — гарантированно без старья
         shell: bash
         run: |
           set -e
-          APP_GRADLE="android/app/build.gradle"
-          APP_KTS="android/app/build.gradle.kts"
-
-          # IMPROVED: Более безопасные проверки
-          if [ -f "$APP_KTS" ]; then
-            echo "Kotlin DSL detected - patching $APP_KTS"
-            TF="$APP_KTS"
-            # Более безопасные замены
-            if ! grep -q "compileSdk =" "$TF"; then
-              sed -i '/android[[:space:]]*{/a \    compileSdk = 34' "$TF"
-            fi
-            if ! grep -q "namespace =" "$TF"; then
-              sed -i '/android[[:space:]]*{/a \    namespace = "com.naivefox.bp_logger"' "$TF"
-            fi
-            if ! grep -q "compileOptions" "$TF"; then
-              sed -i '/android[[:space:]]*{/a \    compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }' "$TF"
-            fi
-            if ! grep -q "kotlinOptions" "$TF"; then
-              sed -i '/android[[:space:]]*{/a \    kotlinOptions { jvmTarget = "17" }' "$TF"
-            fi
-            
-          elif [ -f "$APP_GRADLE" ]; then
-            echo "Groovy DSL detected - patching $APP_GRADLE"
-            TF="$APP_GRADLE"
-            if ! grep -q "compileSdkVersion" "$TF"; then
-              sed -i '/android[[:space:]]*{/a \    compileSdkVersion 34' "$TF"
-            fi
-            if ! grep -q "namespace" "$TF"; then
-              sed -i '/android[[:space:]]*{/a \    namespace "com.naivefox.bp_logger"' "$TF"
-            fi
-            if ! grep -q "compileOptions" "$TF"; then
-              sed -i '/android[[:space:]]*{/a \    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }' "$TF"
-            fi
-            if ! grep -q "kotlinOptions" "$TF"; then
-              sed -i '/android[[:space:]]*{/a \    kotlinOptions { jvmTarget = "17" }' "$TF"
-            fi
-            
-          else
-            echo "ERROR: No app build file found at $APP_GRADLE or $APP_KTS"
-            echo "Available files in android/app/:"
-            ls -la android/app/ 2>/dev/null || echo "android/app/ not found"
-            exit 1
-          fi
-
-          # gradle.properties
-          mkdir -p android
-          touch android/gradle.properties
-          grep -q 'android.useAndroidX=true' android/gradle.properties || echo 'android.useAndroidX=true' >> android/gradle.properties
-          grep -q 'android.enableJetifier=true' android/gradle.properties || echo 'android.enableJetifier=true' >> android/gradle.properties
-          grep -q 'org.gradle.jvmargs=' android/gradle.properties || echo 'org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8' >> android/gradle.properties
-
-      - name: flutter pub get
-        run: flutter pub get
+          cd app
+          flutter clean
+          rm -rf build
+          # подчистим gradle-кеши, чтобы версия/манифест не прилипали
+          rm -rf ~/.gradle/caches ~/.gradle/wrapper
+          rm -rf android/.gradle
+          flutter pub get
 
       - name: Build release APK (verbose)
-        run: flutter build apk --release -v --dart-define=CI=true
+        shell: bash
+        run: |
+          set -e
+          cd app
+          # На случай редких конфликтов Kotlin/AGP — принудительно синкнём gradle-wrapper
+          sed -i 's/distributionUrl=.*/distributionUrl=https\:\/\/services.gradle.org\/distributions\/gradle-8.7-bin.zip/' android/gradle/wrapper/gradle-wrapper.properties || true
+          flutter build apk --release --no-tree-shake-icons -v
+          ls -lah build/app/outputs/flutter-apk || true
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: bp_logger-apk
-          path: build/app/outputs/flutter-apk/*.apk
+          path: |
+            app/build/app/outputs/flutter-apk/app-release.apk
+            app/build/app/outputs/flutter-apk/*.apk
           if-no-files-found: error
