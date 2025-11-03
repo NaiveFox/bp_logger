@@ -1,4 +1,4 @@
-name: Build Android APK (diagnostic)
+name: Build Android APK (diagnostic-safe)
 
 on:
   push:
@@ -36,19 +36,17 @@ jobs:
         run: |
           set -e
           cd app
-          # гарантируем наличие проекта
           if [ ! -d android ]; then
             flutter create . --org com.naivefox --project-name bp_logger
           fi
           flutter pub get
-
-          # Gradle wrapper и параметры
+          # Правим gradle-wrapper и gradle.properties без heredoc
           sed -i 's|^distributionUrl=.*|distributionUrl=https://services.gradle.org/distributions/gradle-8.7-bin.zip|' android/gradle/wrapper/gradle-wrapper.properties || true
-          cat >> android/gradle.properties <<'PROPS'
-org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8
-android.enableR8=false
-android.enableDexingArtifactTransform=false
-PROPS
+          printf "%s\n" \
+            "org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8" \
+            "android.enableR8=false" \
+            "android.enableDexingArtifactTransform=false" \
+            >> android/gradle.properties
 
       - name: Build debug APK (sanity check)
         shell: bash
@@ -63,8 +61,6 @@ PROPS
         run: |
           set -e
           cd app/android
-          # Собираем напрямую gradle'м, чтобы увидеть ПЕРВЫЙ root-cause
-          ./gradlew --version
           ./gradlew assembleRelease --stacktrace --info --no-daemon
 
       - name: Upload artifact
