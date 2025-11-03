@@ -13,11 +13,27 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Java 17 для Gradle/Android
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Flutter SDK
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
 
+      # Android SDK + лицензии
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android Licenses
+        run: yes | sdkmanager --licenses
+
+      # Собираем скелет проекта и подменяем наш код
       - name: Create Flutter project skeleton
         run: |
           flutter --version
