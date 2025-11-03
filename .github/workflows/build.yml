@@ -8,6 +8,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30  # Добавил таймаут
 
     steps:
       - name: Checkout
@@ -23,7 +24,7 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: stable
-          cache: false
+          cache: true  # Включил кэш для скорости
 
       - name: Show Flutter & Dart versions
         run: |
@@ -38,7 +39,7 @@ jobs:
           cd app
           # Если нет pubspec.yaml — создадим минимальный
           if [ ! -f pubspec.yaml ]; then
-            cat > pubspec.yaml <<'YAML'
+            cat > pubspec.yaml << 'YAML'
 name: bp_logger
 description: BP Logger minimal app
 publish_to: "none"
@@ -54,26 +55,25 @@ YAML
           # Если нет lib/main.dart — создадим болванку
           mkdir -p lib
           if [ ! -f lib/main.dart ]; then
-            cat > lib/main.dart <<'DART'
+            cat > lib/main.dart << 'DART'
 import 'package:flutter/material.dart';
 void main() => runApp(const MaterialApp(home: Scaffold(body: Center(child: Text('BP Logger placeholder')))));
 DART
           fi
           # Если нет android-папки — сгенерируем
           if [ ! -d android ]; then
-            flutter create .
+            flutter create . --org com.naivefox  # Добавил package name
           fi
 
-      - name: Clean caches (Flutter/Gradle) — гарантированно без старья
+      - name: Clean caches
         shell: bash
         run: |
           set -e
           cd app
           flutter clean
           rm -rf build
-          # подчистим gradle-кеши, чтобы версия/манифест не прилипали
-          rm -rf ~/.gradle/caches ~/.gradle/wrapper
-          rm -rf android/.gradle
+          # Убрал удаление глобальных gradle кэшей - слишком агрессивно
+          rm -rf android/.gradle android/build
           flutter pub get
 
       - name: Build release APK (verbose)
@@ -81,10 +81,10 @@ DART
         run: |
           set -e
           cd app
-          # На случай редких конфликтов Kotlin/AGP — принудительно синкнём gradle-wrapper
-          sed -i 's/distributionUrl=.*/distributionUrl=https\:\/\/services.gradle.org\/distributions\/gradle-8.7-bin.zip/' android/gradle/wrapper/gradle-wrapper.properties || true
+          # Более безопасная версия Gradle
+          sed -i 's|distributionUrl=.*|distributionUrl=https\://services.gradle.org/distributions/gradle-7.6-all.zip|' android/gradle/wrapper/gradle-wrapper.properties || true
           flutter build apk --release --no-tree-shake-icons -v
-          ls -lah build/app/outputs/flutter-apk || true
+          ls -lah build/app/outputs/flutter-apk/ || echo "APK directory not found"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
