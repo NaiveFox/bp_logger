@@ -2,7 +2,7 @@ name: bp_logger
 description: BP Logger minimal app for recording blood pressure
 publish_to: "none"
 
-version: 1.0.0+1
+version: 1.0.1+2   
 
 environment:
   sdk: ">=3.3.0 <4.0.0"
