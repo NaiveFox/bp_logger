@@ -8,7 +8,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30  # Добавил таймаут
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -24,7 +24,7 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: stable
-          cache: true  # Включил кэш для скорости
+          cache: true
 
       - name: Show Flutter & Dart versions
         run: |
@@ -39,7 +39,7 @@ jobs:
           cd app
           # Если нет pubspec.yaml — создадим минимальный
           if [ ! -f pubspec.yaml ]; then
-            cat > pubspec.yaml << 'YAML'
+            cat > pubspec.yaml << 'EOF'
 name: bp_logger
 description: BP Logger minimal app
 publish_to: "none"
@@ -50,19 +50,19 @@ dependencies:
     sdk: flutter
 flutter:
   uses-material-design: true
-YAML
+EOF
           fi
           # Если нет lib/main.dart — создадим болванку
           mkdir -p lib
           if [ ! -f lib/main.dart ]; then
-            cat > lib/main.dart << 'DART'
+            cat > lib/main.dart << 'EOF'
 import 'package:flutter/material.dart';
 void main() => runApp(const MaterialApp(home: Scaffold(body: Center(child: Text('BP Logger placeholder')))));
-DART
+EOF
           fi
           # Если нет android-папки — сгенерируем
           if [ ! -d android ]; then
-            flutter create . --org com.naivefox  # Добавил package name
+            flutter create . --org com.naivefox
           fi
 
       - name: Clean caches
@@ -72,7 +72,6 @@ DART
           cd app
           flutter clean
           rm -rf build
-          # Убрал удаление глобальных gradle кэшей - слишком агрессивно
           rm -rf android/.gradle android/build
           flutter pub get
 
@@ -81,7 +80,6 @@ DART
         run: |
           set -e
           cd app
-          # Более безопасная версия Gradle
           sed -i 's|distributionUrl=.*|distributionUrl=https\://services.gradle.org/distributions/gradle-7.6-all.zip|' android/gradle/wrapper/gradle-wrapper.properties || true
           flutter build apk --release --no-tree-shake-icons -v
           ls -lah build/app/outputs/flutter-apk/ || echo "APK directory not found"
