@@ -65,7 +65,6 @@ jobs:
           grep -q '^org.gradle.jvmargs=' "$GP" || echo 'org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8' >> "$GP"
           grep -q '^android.useAndroidX=' "$GP" || echo 'android.useAndroidX=true' >> "$GP"
           grep -q '^android.enableJetifier=' "$GP" || echo 'android.enableJetifier=true' >> "$GP"
-          grep -q '^android.enableR8=' "$GP" || echo 'android.enableR8=false' >> "$GP"
           grep -q '^android.useFullClasspathForDexingTransform=' "$GP" || echo 'android.useFullClasspathForDexingTransform=true' >> "$GP"
 
           echo "----- gradle.properties -----"
