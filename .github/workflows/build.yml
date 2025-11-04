@@ -1,4 +1,4 @@
-name: Build Android APK (diagnostic-safe)
+name: Build Android APK (bulletproof)
 
 on:
   push:
@@ -8,6 +8,10 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+
+    env:
+      JAVA_TOOL_OPTIONS: "-Xms512m -Xmx3g"
+      GRADLE_OPTS: "-Dorg.gradle.jvmargs='-Xmx3g -Dfile.encoding=UTF-8'"
 
     steps:
       - name: Checkout
@@ -23,52 +27,126 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: stable
-          cache: false
+          cache: true
 
       - name: Doctor
         run: |
           flutter --version
-          flutter doctor -v
           dart --version
+          flutter doctor -v
 
       - name: Prepare project
         shell: bash
         run: |
           set -e
-          cd app
-          if [ ! -d android ]; then
+          # Корневая папка проекта с кодом
+          if [ -d app ]; then cd app; else mkdir -p app && cd app; fi
+
+          # Минимальный проект, если ещё нет
+          if [ ! -d android ] || [ ! -f pubspec.yaml ]; then
             flutter create . --org com.naivefox --project-name bp_logger
           fi
-          flutter pub get
-          # Правим gradle-wrapper и gradle.properties без heredoc
-          sed -i 's|^distributionUrl=.*|distributionUrl=https://services.gradle.org/distributions/gradle-8.7-bin.zip|' android/gradle/wrapper/gradle-wrapper.properties || true
-          printf "%s\n" \
-            "org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8" \
-            "android.enableR8=false" \
-            "android.enableDexingArtifactTransform=false" \
-            >> android/gradle.properties
 
-      - name: Build debug APK (sanity check)
+          flutter pub get
+
+      - name: Pin Gradle / AGP / Kotlin for both templates
         shell: bash
         run: |
           set -e
           cd app
-          flutter build apk --debug --no-tree-shake-icons -v
-          ls -lah build/app/outputs/flutter-apk || true
 
-      - name: Build release APK (verbose via Gradle)
+          # ==== Gradle wrapper 8.7 ====
+          WRAP=android/gradle/wrapper/gradle-wrapper.properties
+          if [ -f "$WRAP" ]; then
+            sed -i "s#^distributionUrl=.*#distributionUrl=https\\://services.gradle.org/distributions/gradle-8.7-bin.zip#g" "$WRAP"
+          fi
+
+          # ==== Новые шаблоны: libs.versions.toml ====
+          TOML="android/gradle/libs.versions.toml"
+          if [ -f "$TOML" ]; then
+            # AGP 8.5.2, Kotlin 1.9.24 – проверенные связки под Flutter stable
+            sed -i "s/^agp *= *.*/agp = \"8.5.2\"/g" "$TOML" || true
+            sed -i "s/^kotlin *= *.*/kotlin = \"1.9.24\"/g" "$TOML" || true
+          fi
+
+          # ==== Старые шаблоны: build.gradle(.kts) на уровне android/ ====
+          TOP_GROOVY="android/build.gradle"
+          TOP_KTS="android/build.gradle.kts"
+          if [ -f "$TOP_GROOVY" ]; then
+            sed -i "s/com.android.tools.build:gradle:[0-9.]\+/com.android.tools.build:gradle:8.5.2/g" "$TOP_GROOVY"
+            sed -i "s/org.jetbrains.kotlin:kotlin-gradle-plugin:[0-9.]\+/org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.24/g" "$TOP_GROOVY"
+          fi
+          if [ -f "$TOP_KTS" ]; then
+            sed -i "s/id(\"com.android.application\") version \".*\"/id(\"com.android.application\") version \"8.5.2\"/g" "$TOP_KTS"
+            sed -i "s/id(\"org.jetbrains.kotlin.android\") version \".*\"/id(\"org.jetbrains.kotlin.android\") version \"1.9.24\"/g" "$TOP_KTS"
+          fi
+
+          # ==== gradle.properties — стабильность сборки ====
+          PROPS="android/gradle.properties"
+          touch "$PROPS"
+          grep -q "^org.gradle.jvmargs" "$PROPS" || echo "org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8" >> "$PROPS"
+          grep -q "^android.useAndroidX" "$PROPS" || echo "android.useAndroidX=true" >> "$PROPS"
+          grep -q "^android.enableR8" "$PROPS" || echo "android.enableR8=true" >> "$PROPS"
+
+      - name: Force compileSdk / minSdk (Groovy or KTS)
         shell: bash
         run: |
           set -e
-          cd app/android
-          ./gradlew assembleRelease --stacktrace --info --no-daemon
+          cd app
+          APP_G="android/app/build.gradle"
+          APP_K="android/app/build.gradle.kts"
+
+          # Groovy
+          if [ -f "$APP_G" ]; then
+            # compileSdk
+            if grep -q "compileSdkVersion" "$APP_G"; then
+              sed -i "s/compileSdkVersion *[0-9][0-9]*/compileSdkVersion 34/g" "$APP_G"
+            else
+              sed -i "s/android {/android {\n    compileSdkVersion 34/g" "$APP_G"
+            fi
+            # minSdk
+            if grep -q "minSdkVersion" "$APP_G"; then
+              sed -i "s/minSdkVersion *[0-9][0-9]*/minSdkVersion 23/g" "$APP_G"
+            else
+              sed -i "s/defaultConfig {/defaultConfig {\n        minSdkVersion 23/g" "$APP_G"
+            fi
+            # targetSdk
+            if grep -q "targetSdkVersion" "$APP_G"; then
+              sed -i "s/targetSdkVersion *[0-9][0-9]*/targetSdkVersion 34/g" "$APP_G"
+            else
+              sed -i "s/minSdkVersion 23/minSdkVersion 23\n        targetSdkVersion 34/g" "$APP_G"
+            fi
+          fi
+
+          # Kotlin DSL
+          if [ -f "$APP_K" ]; then
+            # compileSdk
+            if grep -q "compileSdk =" "$APP_K"; then
+              sed -i "s/compileSdk = *[0-9][0-9]*/compileSdk = 34/g" "$APP_K"
+            else
+              sed -i "s/android {/android {\n    compileSdk = 34/g" "$APP_K"
+            fi
+            # defaultConfig block
+            if grep -q "defaultConfig" "$APP_K"; then
+              sed -i "s/minSdk = *[0-9][0-9]*/minSdk = 23/g" "$APP_K"
+              sed -i "s/targetSdk = *[0-9][0-9]*/targetSdk = 34/g" "$APP_K"
+            else
+              # Вставка defaultConfig при отсутствии
+              sed -i "/android {/a \    defaultConfig {\n        minSdk = 23\n        targetSdk = 34\n    }" "$APP_K"
+            fi
+          fi
+
+      - name: Build release APK
+        shell: bash
+        run: |
+          set -e
+          cd app
+          # Доп. логи — на случай странных падений
+          flutter build apk --release --no-tree-shake-icons -v
 
       - name: Upload artifact
-        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: bp_logger-apk
-          path: |
-            app/build/app/outputs/flutter-apk/app-debug.apk
-            app/build/outputs/apk/release/app-release*.apk
-          if-no-files-found: warn
+          path: app/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
