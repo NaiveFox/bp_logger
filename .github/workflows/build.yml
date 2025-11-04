@@ -8,6 +8,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -30,38 +31,56 @@ jobs:
           flutter doctor -v
           dart --version
 
-      - name: Prepare clean project
+      - name: Prepare clean Flutter project under proj/
         shell: bash
         run: |
           set -e
           rm -rf proj
           flutter create proj
+
+          # если у тебя есть собственный код, подкладываем его в proj
           if [ -d app/lib ]; then
             rm -rf proj/lib
             cp -r app/lib proj/lib
           fi
+
           if [ -f app/pubspec.yaml ]; then
             cp app/pubspec.yaml proj/pubspec.yaml
           fi
+
           if [ -d app/assets ]; then
             rm -rf proj/assets
             cp -r app/assets proj/assets
           fi
+
           (cd proj && flutter pub get)
 
-      - name: Patch Gradle for Java17 + desugaring
-        run: python .github/scripts/patch_gradle.py
+      - name: Ensure gradle.properties flags
+        shell: bash
+        run: |
+          set -e
+          GP=proj/android/gradle.properties
+          touch "$GP"
+          grep -q '^android.useAndroidX=true' "$GP" || echo 'android.useAndroidX=true' >> "$GP"
+          grep -q '^android.enableJetifier=true' "$GP" || echo 'android.enableJetifier=true' >> "$GP"
+          grep -q '^kotlin.jvmTarget=17' "$GP" || echo 'kotlin.jvmTarget=17' >> "$GP"
+
+      - name: Patch gradle for coreLibraryDesugaring (safe)
+        shell: bash
+        run: |
+          set -e
+          python3 tools/patch_gradle.py || python tools/patch_gradle.py
+          echo "Patched gradle."
 
       - name: Build release APK
         shell: bash
         run: |
           set -e
-          cd proj
-          flutter build apk --release
+          (cd proj && flutter build apk --release)
+          ls -lah proj/build/app/outputs/flutter-apk || true
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bp_logger-apk
-          path: proj/build/app/outputs/flutter-apk/app-release.apk
-          if-no-files-found: error
+          name: apk-release
+          path: proj/build/app/outputs/flutter-apk/*.apk
