@@ -5,16 +5,9 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
-concurrency:
-  group: build-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   build:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: bash
 
     steps:
       - name: Checkout
@@ -24,12 +17,12 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
 
       - name: Set up Flutter (stable)
         uses: subosito/flutter-action@v2
         with:
-          channel: 'stable'
+          channel: stable
           cache: true
 
       - name: Flutter doctor
@@ -39,33 +32,40 @@ jobs:
           dart --version
 
       - name: Prepare clean project
+        shell: bash
         run: |
           set -e
-          echo "🧹 Creating fresh Flutter project in ./proj"
+          echo "🧹 Creating clean Flutter project"
           rm -rf proj
-          flutter create -t app proj
+          flutter create proj
+          cd proj
 
-          echo "📦 Injecting your sources (if present)"
-          # Твои исходники ожидаются в app/lib и app/pubspec.yaml в корне репо
+          echo "📦 Replace sources/pubspec from repo if present"
+          cd ..
           if [ -d app/lib ]; then
             rm -rf proj/lib
-            cp -R app/lib proj/lib
+            cp -r app/lib proj/lib
           fi
 
+          # перенос pubspec из репозитория
           if [ -f app/pubspec.yaml ]; then
             cp app/pubspec.yaml proj/pubspec.yaml
           fi
 
-          # Доп. каталоги (по желанию)
+          # перенести assets, если есть
           if [ -d app/assets ]; then
-            mkdir -p proj/assets
-            cp -R app/assets/ proj/assets/
-          fi
-          if [ -f app/analysis_options.yaml ]; then
-            cp app/analysis_options.yaml proj/analysis_options.yaml
+            rm -rf proj/assets
+            cp -r app/assets proj/assets
           fi
 
-          echo "✅ Project prepared"
+          # необязательно: имя приложения из strings.xml, только если файл существует
+          STR=proj/android/app/src/main/res/values/strings.xml
+          if [ -f "$STR" ] && grep -q 'app_name' "$STR"; then
+            echo "🏷  App name in strings.xml remains as in template (change later if needed)"
+          fi
+
+          echo "📥 flutter pub get"
+          (cd proj && flutter pub get)
 
       - name: Enable core library desugaring (AGP8)
         run: |
@@ -77,91 +77,80 @@ jobs:
 
           if [ -f "$FILE_KTS" ]; then
             echo "→ Patching build.gradle.kts"
-            python3 - <<'PY'
+            bash -c "python3 - <<'PY'
 import re, pathlib
-p = pathlib.Path("proj/android/app/build.gradle.kts")
-txt = p.read_text(encoding="utf-8")
+p = pathlib.Path('proj/android/app/build.gradle.kts')
+txt = p.read_text(encoding='utf-8')
 
-# compileOptions + kotlinOptions + desugaring toggle
-if "isCoreLibraryDesugaringEnabled" not in txt:
+if 'isCoreLibraryDesugaringEnabled' not in txt:
     txt = re.sub(
-        r'android\s*\{',
-        'android {\n'
-        '    compileOptions {\n'
-        '        sourceCompatibility = JavaVersion.VERSION_17\n'
-        '        targetCompatibility = JavaVersion.VERSION_17\n'
-        '        isCoreLibraryDesugaringEnabled = true\n'
-        '    }\n'
-        '    kotlinOptions {\n'
-        '        jvmTarget = "17"\n'
-        '    }\n',
+        r'android\\s*\\{',
+        'android {\\n'
+        '    compileOptions {\\n'
+        '        sourceCompatibility = JavaVersion.VERSION_17\\n'
+        '        targetCompatibility = JavaVersion.VERSION_17\\n'
+        '        isCoreLibraryDesugaringEnabled = true\\n'
+        '    }\\n'
+        '    kotlinOptions {\\n'
+        '        jvmTarget = \"17\"\\n'
+        '    }\\n',
         txt, count=1
     )
 
-# dependency
-if "coreLibraryDesugaring(" not in txt:
+if 'coreLibraryDesugaring(' not in txt:
     txt = re.sub(
-        r'dependencies\s*\{',
-        'dependencies {\n'
-        '    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")\n',
+        r'dependencies\\s*\\{',
+        'dependencies {\\n'
+        '    coreLibraryDesugaring(\"com.android.tools:desugar_jdk_libs:2.0.4\")\\n',
         txt, count=1
     )
 
-p.write_text(txt, encoding="utf-8")
-print("✅ build.gradle.kts patched")
-PY
-
+p.write_text(txt, encoding='utf-8')
+print('✅ build.gradle.kts patched')
+PY"
           elif [ -f "$FILE_GROOVY" ]; then
             echo "→ Patching build.gradle"
-            python3 - <<'PY'
+            bash -c "python3 - <<'PY'
 import re, pathlib
-p = pathlib.Path("proj/android/app/build.gradle")
-txt = p.read_text(encoding="utf-8")
+p = pathlib.Path('proj/android/app/build.gradle')
+txt = p.read_text(encoding='utf-8')
 
-if "coreLibraryDesugaringEnabled" not in txt:
+if 'coreLibraryDesugaringEnabled' not in txt:
     txt = re.sub(
-        r'android\s*\{',
-        'android {\n'
-        '    compileOptions {\n'
-        '        sourceCompatibility JavaVersion.VERSION_17\n'
-        '        targetCompatibility JavaVersion.VERSION_17\n'
-        '        coreLibraryDesugaringEnabled true\n'
-        '    }\n'
-        '    kotlinOptions {\n'
-        '        jvmTarget = "17"\n'
-        '    }\n',
+        r'android\\s*\\{',
+        'android {\\n'
+        '    compileOptions {\\n'
+        '        sourceCompatibility JavaVersion.VERSION_17\\n'
+        '        targetCompatibility JavaVersion.VERSION_17\\n'
+        '        coreLibraryDesugaringEnabled true\\n'
+        '    }\\n'
+        '    kotlinOptions {\\n'
+        '        jvmTarget = \"17\"\\n'
+        '    }\\n',
         txt, count=1
     )
 
-if "coreLibraryDesugaring" not in txt:
+if 'coreLibraryDesugaring' not in txt:
     txt = re.sub(
-        r'dependencies\s*\{',
-        'dependencies {\n'
-        '    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.0.4"\n',
+        r'dependencies\\s*\\{',
+        'dependencies {\\n'
+        '    coreLibraryDesugaring \"com.android.tools:desugar_jdk_libs:2.0.4\"\\n',
         txt, count=1
     )
 
-p.write_text(txt, encoding="utf-8")
-print("✅ build.gradle patched")
-PY
+p.write_text(txt, encoding='utf-8')
+print('✅ build.gradle patched')
+PY"
           else
             echo "⚠️  No app Gradle file found"
             exit 1
           fi
 
-      - name: Resolve dependencies
-        working-directory: proj
-        run: |
-          set -e
-          flutter pub get
-          # Покажи, если что-то устарело
-          flutter pub outdated || true
-
       - name: Build release APK
-        working-directory: proj
+        shell: bash
         run: |
           set -e
-          echo "🏗  Building release APK"
+          cd proj
           flutter build apk --release
 
       - name: Upload artifact
