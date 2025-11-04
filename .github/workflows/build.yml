@@ -2,16 +2,12 @@ name: Build Android APK (bulletproof)
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
-    env:
-      JAVA_TOOL_OPTIONS: "-Xms512m -Xmx3g"
-      GRADLE_OPTS: "-Dorg.gradle.jvmargs='-Xmx3g -Dfile.encoding=UTF-8'"
 
     steps:
       - name: Checkout
@@ -32,121 +28,65 @@ jobs:
       - name: Doctor
         run: |
           flutter --version
-          dart --version
           flutter doctor -v
+          dart --version
 
       - name: Prepare project
         shell: bash
         run: |
           set -e
-          # Корневая папка проекта с кодом
-          if [ -d app ]; then cd app; else mkdir -p app && cd app; fi
+          cd app
 
-          # Минимальный проект, если ещё нет
-          if [ ! -d android ] || [ ! -f pubspec.yaml ]; then
+          # Если нет android-папки – сгенерируем стандартную
+          if [ ! -d android ]; then
             flutter create . --org com.naivefox --project-name bp_logger
           fi
 
+          # Убедимся, что зависимости подтянуты
           flutter pub get
 
-      - name: Pin Gradle / AGP / Kotlin for both templates
-        shell: bash
-        run: |
-          set -e
-          cd app
-
-          # ==== Gradle wrapper 8.7 ====
-          WRAP=android/gradle/wrapper/gradle-wrapper.properties
-          if [ -f "$WRAP" ]; then
-            sed -i "s#^distributionUrl=.*#distributionUrl=https\\://services.gradle.org/distributions/gradle-8.7-bin.zip#g" "$WRAP"
-          fi
-
-          # ==== Новые шаблоны: libs.versions.toml ====
+          # ---------- ПИНЫ версий для совместимости ----------
+          # Flutter stable ожидает Kotlin 1.9.24 + AGP 8.5.x (совместимо с Gradle 8.7)
+          # 1) Новый формат: android/gradle/libs.versions.toml
           TOML="android/gradle/libs.versions.toml"
           if [ -f "$TOML" ]; then
-            # AGP 8.5.2, Kotlin 1.9.24 – проверенные связки под Flutter stable
-            sed -i "s/^agp *= *.*/agp = \"8.5.2\"/g" "$TOML" || true
-            sed -i "s/^kotlin *= *.*/kotlin = \"1.9.24\"/g" "$TOML" || true
+            echo "🔧 Forcing Kotlin=1.9.24 + AGP=8.5.2 in libs.versions.toml"
+            sed -i 's/^kotlin *= *.*/kotlin = "1.9.24"/' "$TOML" || true
+            sed -i 's/^agp *= *.*/agp = "8.5.2"/' "$TOML" || true
+            grep -q 'kotlin = "1.9.24"' "$TOML" || echo 'kotlin = "1.9.24"' >> "$TOML"
+            grep -q 'agp = "8.5.2"' "$TOML"   || echo 'agp = "8.5.2"'   >> "$TOML"
           fi
 
-          # ==== Старые шаблоны: build.gradle(.kts) на уровне android/ ====
-          TOP_GROOVY="android/build.gradle"
-          TOP_KTS="android/build.gradle.kts"
-          if [ -f "$TOP_GROOVY" ]; then
-            sed -i "s/com.android.tools.build:gradle:[0-9.]\+/com.android.tools.build:gradle:8.5.2/g" "$TOP_GROOVY"
-            sed -i "s/org.jetbrains.kotlin:kotlin-gradle-plugin:[0-9.]\+/org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.24/g" "$TOP_GROOVY"
-          fi
-          if [ -f "$TOP_KTS" ]; then
-            sed -i "s/id(\"com.android.application\") version \".*\"/id(\"com.android.application\") version \"8.5.2\"/g" "$TOP_KTS"
-            sed -i "s/id(\"org.jetbrains.kotlin.android\") version \".*\"/id(\"org.jetbrains.kotlin.android\") version \"1.9.24\"/g" "$TOP_KTS"
-          fi
+          # 2) Старый формат: android/build.gradle(.kts) и android/app/build.gradle(.kts)
+          # Принудительно понижаем Kotlin Gradle Plugin до 1.9.24
+          for F in android/build.gradle android/build.gradle.kts; do
+            if [ -f "$F" ]; then
+              sed -i 's/org.jetbrains.kotlin:kotlin-gradle-plugin:[^"'"'"']*/org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.24/' "$F" || true
+            fi
+          done
 
-          # ==== gradle.properties — стабильность сборки ====
-          PROPS="android/gradle.properties"
-          touch "$PROPS"
-          grep -q "^org.gradle.jvmargs" "$PROPS" || echo "org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8" >> "$PROPS"
-          grep -q "^android.useAndroidX" "$PROPS" || echo "android.useAndroidX=true" >> "$PROPS"
-          grep -q "^android.enableR8" "$PROPS" || echo "android.enableR8=true" >> "$PROPS"
+          # 3) gradle.properties — безопасные флаги и память
+          GP="android/gradle.properties"
+          touch "$GP"
+          grep -q '^org.gradle.jvmargs=' "$GP" || echo 'org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8' >> "$GP"
+          grep -q '^android.useAndroidX=' "$GP" || echo 'android.useAndroidX=true' >> "$GP"
+          grep -q '^android.enableJetifier=' "$GP" || echo 'android.enableJetifier=true' >> "$GP"
+          # Включим R8/DEX флаги в безопасном режиме
+          grep -q '^android.enableR8=' "$GP" || echo 'android.enableR8=false' >> "$GP"
+          grep -q '^android.enableDexingArtifactTransform=' "$GP" || echo 'android.enableDexingArtifactTransform=false' >> "$GP"
 
-      - name: Force compileSdk / minSdk (Groovy or KTS)
+          # На всякий случай — локальный gradle-wrapper.properties не трогаем,
+          # flutter сам подтянет совместимый Gradle под stable.
+
+      - name: Build release APK (verbose)
         shell: bash
         run: |
           set -e
           cd app
-          APP_G="android/app/build.gradle"
-          APP_K="android/app/build.gradle.kts"
-
-          # Groovy
-          if [ -f "$APP_G" ]; then
-            # compileSdk
-            if grep -q "compileSdkVersion" "$APP_G"; then
-              sed -i "s/compileSdkVersion *[0-9][0-9]*/compileSdkVersion 34/g" "$APP_G"
-            else
-              sed -i "s/android {/android {\n    compileSdkVersion 34/g" "$APP_G"
-            fi
-            # minSdk
-            if grep -q "minSdkVersion" "$APP_G"; then
-              sed -i "s/minSdkVersion *[0-9][0-9]*/minSdkVersion 23/g" "$APP_G"
-            else
-              sed -i "s/defaultConfig {/defaultConfig {\n        minSdkVersion 23/g" "$APP_G"
-            fi
-            # targetSdk
-            if grep -q "targetSdkVersion" "$APP_G"; then
-              sed -i "s/targetSdkVersion *[0-9][0-9]*/targetSdkVersion 34/g" "$APP_G"
-            else
-              sed -i "s/minSdkVersion 23/minSdkVersion 23\n        targetSdkVersion 34/g" "$APP_G"
-            fi
-          fi
-
-          # Kotlin DSL
-          if [ -f "$APP_K" ]; then
-            # compileSdk
-            if grep -q "compileSdk =" "$APP_K"; then
-              sed -i "s/compileSdk = *[0-9][0-9]*/compileSdk = 34/g" "$APP_K"
-            else
-              sed -i "s/android {/android {\n    compileSdk = 34/g" "$APP_K"
-            fi
-            # defaultConfig block
-            if grep -q "defaultConfig" "$APP_K"; then
-              sed -i "s/minSdk = *[0-9][0-9]*/minSdk = 23/g" "$APP_K"
-              sed -i "s/targetSdk = *[0-9][0-9]*/targetSdk = 34/g" "$APP_K"
-            else
-              # Вставка defaultConfig при отсутствии
-              sed -i "/android {/a \    defaultConfig {\n        minSdk = 23\n        targetSdk = 34\n    }" "$APP_K"
-            fi
-          fi
-
-      - name: Build release APK
-        shell: bash
-        run: |
-          set -e
-          cd app
-          # Доп. логи — на случай странных падений
-          flutter build apk --release --no-tree-shake-icons -v
+          flutter build apk --release -v
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: bp_logger-apk
           path: app/build/app/outputs/flutter-apk/app-release.apk
-          if-no-files-found: error
