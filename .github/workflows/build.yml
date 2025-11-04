@@ -1,4 +1,4 @@
-name: Build Android APK (bulletproof)
+ name: Build Android APK (bulletproof)
 
 on:
   push:
@@ -37,17 +37,17 @@ jobs:
           set -e
           cd app
 
-          # Если нет android-папки – сгенерируем стандартную
+          # Если нет android-папки — создаем стандартную структуру
           if [ ! -d android ]; then
             flutter create . --org com.naivefox --project-name bp_logger
           fi
 
-          # Убедимся, что зависимости подтянуты
+          # Подтянуть зависимости
           flutter pub get
 
-          # ---------- ПИНЫ версий для совместимости ----------
-          # Flutter stable ожидает Kotlin 1.9.24 + AGP 8.5.x (совместимо с Gradle 8.7)
-          # 1) Новый формат: android/gradle/libs.versions.toml
+          # ---------- Совместимость Kotlin / Gradle ----------
+          # Flutter stable использует Gradle 8.7 и Kotlin 1.9.24
+          # Обновляем libs.versions.toml если он есть
           TOML="android/gradle/libs.versions.toml"
           if [ -f "$TOML" ]; then
             echo "🔧 Forcing Kotlin=1.9.24 + AGP=8.5.2 in libs.versions.toml"
@@ -57,36 +57,42 @@ jobs:
             grep -q 'agp = "8.5.2"' "$TOML"   || echo 'agp = "8.5.2"'   >> "$TOML"
           fi
 
-          # 2) Старый формат: android/build.gradle(.kts) и android/app/build.gradle(.kts)
-          # Принудительно понижаем Kotlin Gradle Plugin до 1.9.24
+          # Принудительно фиксируем Kotlin Gradle Plugin в build.gradle(.kts)
           for F in android/build.gradle android/build.gradle.kts; do
             if [ -f "$F" ]; then
               sed -i 's/org.jetbrains.kotlin:kotlin-gradle-plugin:[^"'"'"']*/org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.24/' "$F" || true
             fi
           done
 
-          # 3) gradle.properties — безопасные флаги и память
+          # ---------- gradle.properties ----------
           GP="android/gradle.properties"
           touch "$GP"
+
+          # Оптимальные параметры JVM и AndroidX
           grep -q '^org.gradle.jvmargs=' "$GP" || echo 'org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8' >> "$GP"
           grep -q '^android.useAndroidX=' "$GP" || echo 'android.useAndroidX=true' >> "$GP"
           grep -q '^android.enableJetifier=' "$GP" || echo 'android.enableJetifier=true' >> "$GP"
-          # Включим R8/DEX флаги в безопасном режиме
-          grep -q '^android.enableR8=' "$GP" || echo 'android.enableR8=false' >> "$GP"
-          grep -q '^android.enableDexingArtifactTransform=' "$GP" || echo 'android.enableDexingArtifactTransform=false' >> "$GP"
 
-          # На всякий случай — локальный gradle-wrapper.properties не трогаем,
-          # flutter сам подтянет совместимый Gradle под stable.
+          # Безопасный R8 и новые DEX-настройки
+          grep -q '^android.enableR8=' "$GP" || echo 'android.enableR8=false' >> "$GP"
+          # ⚠️ Новое свойство вместо удалённого android.enableDexingArtifactTransform
+          grep -q '^android.useFullClasspathForDexingTransform=' "$GP" || echo 'android.useFullClasspathForDexingTransform=true' >> "$GP"
+
+          # Проверим содержимое gradle.properties
+          echo "----- gradle.properties -----"
+          cat "$GP"
+          echo "------------------------------"
 
       - name: Build release APK (verbose)
         shell: bash
         run: |
           set -e
           cd app
+          echo "🚀 Building release APK..."
           flutter build apk --release -v
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: bp_logger-apk
-          path: app/build/app/outputs/flutter-apk/app-release.apk
+          path: app/build/app/outputs/flutter-apk/app-release.apk         
