@@ -1,13 +1,20 @@
-name: Build Android APK (stable + desugaring)
+name: Build Android APK (bulletproof)
 
 on:
   push:
     branches: [ main ]
   workflow_dispatch:
 
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - name: Checkout
@@ -17,12 +24,12 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: '17'
 
       - name: Set up Flutter (stable)
         uses: subosito/flutter-action@v2
         with:
-          channel: "stable"
+          channel: 'stable'
           cache: true
 
       - name: Flutter doctor
@@ -32,121 +39,135 @@ jobs:
           dart --version
 
       - name: Prepare clean project
-        shell: bash
         run: |
           set -e
+          echo "🧹 Creating fresh Flutter project in ./proj"
           rm -rf proj
           flutter create -t app proj
 
-          # Подменяем наш код
-          rm -rf proj/lib
-          cp -r app/lib proj/lib
-          cp app/pubspec.yaml proj/pubspec.yaml
-
-          # (Опционально) Имя приложения, если есть strings.xml
-          STR=proj/android/app/src/main/res/values/strings.xml
-          if [ -f "$STR" ]; then
-            sed -i 's#<string name="app_name">.*</string>#<string name="app_name">Мониторинг давления</string>#' "$STR" || true
+          echo "📦 Injecting your sources (if present)"
+          # Твои исходники ожидаются в app/lib и app/pubspec.yaml в корне репо
+          if [ -d app/lib ]; then
+            rm -rf proj/lib
+            cp -R app/lib proj/lib
           fi
 
-      - name: Enable core library desugaring (AGP8, KTS/Gradle)
-        shell: bash
+          if [ -f app/pubspec.yaml ]; then
+            cp app/pubspec.yaml proj/pubspec.yaml
+          fi
+
+          # Доп. каталоги (по желанию)
+          if [ -d app/assets ]; then
+            mkdir -p proj/assets
+            cp -R app/assets/ proj/assets/
+          fi
+          if [ -f app/analysis_options.yaml ]; then
+            cp app/analysis_options.yaml proj/analysis_options.yaml
+          fi
+
+          echo "✅ Project prepared"
+
+      - name: Enable core library desugaring (AGP8)
         run: |
           set -e
+          echo "🔧 Enabling core library desugaring..."
 
-          enable_desugaring_kts() {
-            PYTHON_CODE=$(cat <<'PY'
-import re, sys, pathlib
+          FILE_KTS="proj/android/app/build.gradle.kts"
+          FILE_GROOVY="proj/android/app/build.gradle"
+
+          if [ -f "$FILE_KTS" ]; then
+            echo "→ Patching build.gradle.kts"
+            python3 - <<'PY'
+import re, pathlib
 p = pathlib.Path("proj/android/app/build.gradle.kts")
 txt = p.read_text(encoding="utf-8")
 
-def ensure_android_block(s):
-    if "android {" not in s:
-        return s + "\nandroid {\n}\n"
-    return s
+# compileOptions + kotlinOptions + desugaring toggle
+if "isCoreLibraryDesugaringEnabled" not in txt:
+    txt = re.sub(
+        r'android\s*\{',
+        'android {\n'
+        '    compileOptions {\n'
+        '        sourceCompatibility = JavaVersion.VERSION_17\n'
+        '        targetCompatibility = JavaVersion.VERSION_17\n'
+        '        isCoreLibraryDesugaringEnabled = true\n'
+        '    }\n'
+        '    kotlinOptions {\n'
+        '        jvmTarget = "17"\n'
+        '    }\n',
+        txt, count=1
+    )
 
-def inject_android_options(s):
-    # compileOptions + kotlinOptions
-    if "compileOptions" not in s or "isCoreLibraryDesugaringEnabled" not in s:
-        s = re.sub(r'android\s*\{', 'android {\n    compileOptions {\n        sourceCompatibility = JavaVersion.VERSION_17\n        targetCompatibility = JavaVersion.VERSION_17\n        isCoreLibraryDesugaringEnabled = true\n    }\n    kotlinOptions {\n        jvmTarget = "17"\n    }\n', s, count=1)
-    return s
+# dependency
+if "coreLibraryDesugaring(" not in txt:
+    txt = re.sub(
+        r'dependencies\s*\{',
+        'dependencies {\n'
+        '    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")\n',
+        txt, count=1
+    )
 
-def inject_dependency(s):
-    if "coreLibraryDesugaring(" not in s:
-        s = re.sub(r'dependencies\s*\{', 'dependencies {\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")\n', s, count=1)
-    return s
-
-s = txt
-s = ensure_android_block(s)
-s = inject_android_options(s)
-s = inject_dependency(s)
-p.write_text(s, encoding="utf-8")
-print("KTS patched")
+p.write_text(txt, encoding="utf-8")
+print("✅ build.gradle.kts patched")
 PY
-)
-            python - <<'PY'
-{{PYTHON_CODE}}
-PY
-          }
 
-          enable_desugaring_groovy() {
-            PYTHON_CODE=$(cat <<'PY'
-import re, sys, pathlib
+          elif [ -f "$FILE_GROOVY" ]; then
+            echo "→ Patching build.gradle"
+            python3 - <<'PY'
+import re, pathlib
 p = pathlib.Path("proj/android/app/build.gradle")
 txt = p.read_text(encoding="utf-8")
 
-def ensure_android_block(s):
-    if re.search(r'^\s*android\s*\{', s, flags=re.M) is None:
-        s += "\nandroid {\n}\n"
-    return s
+if "coreLibraryDesugaringEnabled" not in txt:
+    txt = re.sub(
+        r'android\s*\{',
+        'android {\n'
+        '    compileOptions {\n'
+        '        sourceCompatibility JavaVersion.VERSION_17\n'
+        '        targetCompatibility JavaVersion.VERSION_17\n'
+        '        coreLibraryDesugaringEnabled true\n'
+        '    }\n'
+        '    kotlinOptions {\n'
+        '        jvmTarget = "17"\n'
+        '    }\n',
+        txt, count=1
+    )
 
-def inject_android_options(s):
-    if "isCoreLibraryDesugaringEnabled" not in s:
-        s = re.sub(r'android\s*\{', 'android {\n    compileOptions {\n        sourceCompatibility JavaVersion.VERSION_17\n        targetCompatibility JavaVersion.VERSION_17\n        coreLibraryDesugaringEnabled true\n    }\n    kotlinOptions {\n        jvmTarget = "17"\n    }\n', s, count=1)
-    return s
+if "coreLibraryDesugaring" not in txt:
+    txt = re.sub(
+        r'dependencies\s*\{',
+        'dependencies {\n'
+        '    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.0.4"\n',
+        txt, count=1
+    )
 
-def inject_dependency(s):
-    if "coreLibraryDesugaring" not in s:
-        s = re.sub(r'dependencies\s*\{', 'dependencies {\n    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.0.4"\n', s, count=1)
-    return s
-
-s = txt
-s = ensure_android_block(s)
-s = inject_android_options(s)
-s = inject_dependency(s)
-p.write_text(s, encoding="utf-8")
-print("Groovy patched")
+p.write_text(txt, encoding="utf-8")
+print("✅ build.gradle patched")
 PY
-)
-            python - <<'PY'
-{{PYTHON_CODE}}
-PY
-          }
-
-          if [ -f proj/android/app/build.gradle.kts ]; then
-            enable_desugaring_kts
-          elif [ -f proj/android/app/build.gradle ]; then
-            enable_desugaring_groovy
           else
-            echo "No app Gradle found" && exit 1
+            echo "⚠️  No app Gradle file found"
+            exit 1
           fi
 
       - name: Resolve dependencies
+        working-directory: proj
         run: |
           set -e
-          cd proj
           flutter pub get
+          # Покажи, если что-то устарело
+          flutter pub outdated || true
 
       - name: Build release APK
-        env:
-          GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8"
+        working-directory: proj
         run: |
           set -e
-          cd proj
-          flutter build apk --release -v
+          echo "🏗  Building release APK"
+          flutter build apk --release
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: bp_logger-apk
-          path: proj/build/app/outputs/flutter-apk/app-release.apk
+          path: |
+            proj/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
