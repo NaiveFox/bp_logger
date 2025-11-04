@@ -19,65 +19,24 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Flutter (stable)
+      - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
 
-      - name: Doctor
+      - name: Flutter doctor
         run: |
           flutter --version
           flutter doctor -v
-          dart --version
 
-      - name: Prepare project
-        shell: bash
-        run: |
-          set -e
-          cd app
+      - name: Resolve dependencies
+        run: flutter pub get
+        working-directory: app
 
-          if [ ! -d android ]; then
-            flutter create . --org com.naivefox --project-name bp_logger
-          fi
-
-          flutter pub get
-
-          # ---------- Совместимость Kotlin / Gradle ----------
-          TOML="android/gradle/libs.versions.toml"
-          if [ -f "$TOML" ]; then
-            echo "🔧 Forcing Kotlin=1.9.24 + AGP=8.5.2 in libs.versions.toml"
-            sed -i 's/^kotlin *= *.*/kotlin = "1.9.24"/' "$TOML" || true
-            sed -i 's/^agp *= *.*/agp = "8.5.2"/' "$TOML" || true
-            grep -q 'kotlin = "1.9.24"' "$TOML" || echo 'kotlin = "1.9.24"' >> "$TOML"
-            grep -q 'agp = "8.5.2"' "$TOML"   || echo 'agp = "8.5.2"'   >> "$TOML"
-          fi
-
-          for F in android/build.gradle android/build.gradle.kts; do
-            if [ -f "$F" ]; then
-              sed -i 's/org.jetbrains.kotlin:kotlin-gradle-plugin:[^"'"'"']*/org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.24/' "$F" || true
-            fi
-          done
-
-          GP="android/gradle.properties"
-          touch "$GP"
-
-          grep -q '^org.gradle.jvmargs=' "$GP" || echo 'org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8' >> "$GP"
-          grep -q '^android.useAndroidX=' "$GP" || echo 'android.useAndroidX=true' >> "$GP"
-          grep -q '^android.enableJetifier=' "$GP" || echo 'android.enableJetifier=true' >> "$GP"
-          grep -q '^android.useFullClasspathForDexingTransform=' "$GP" || echo 'android.useFullClasspathForDexingTransform=true' >> "$GP"
-
-          echo "----- gradle.properties -----"
-          cat "$GP"
-          echo "------------------------------"
-
-      - name: Build release APK (verbose)
-        shell: bash
-        run: |
-          set -e
-          cd app
-          echo "🚀 Building release APK..."
-          flutter build apk --release -v
+      - name: Build release APK
+        run: flutter build apk --release
+        working-directory: app
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
