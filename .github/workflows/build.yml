@@ -38,36 +38,26 @@ jobs:
           echo "🧹 Creating clean Flutter project"
           rm -rf proj
           flutter create proj
-          cd proj
 
           echo "📦 Replace sources/pubspec from repo if present"
-          cd ..
           if [ -d app/lib ]; then
             rm -rf proj/lib
             cp -r app/lib proj/lib
           fi
 
-          # перенос pubspec из репозитория
           if [ -f app/pubspec.yaml ]; then
             cp app/pubspec.yaml proj/pubspec.yaml
           fi
 
-          # перенести assets, если есть
           if [ -d app/assets ]; then
             rm -rf proj/assets
             cp -r app/assets proj/assets
           fi
 
-          # необязательно: имя приложения из strings.xml, только если файл существует
-          STR=proj/android/app/src/main/res/values/strings.xml
-          if [ -f "$STR" ] && grep -q 'app_name' "$STR"; then
-            echo "🏷  App name in strings.xml remains as in template (change later if needed)"
-          fi
-
-          echo "📥 flutter pub get"
           (cd proj && flutter pub get)
 
       - name: Enable core library desugaring (AGP8)
+        shell: bash
         run: |
           set -e
           echo "🔧 Enabling core library desugaring..."
@@ -75,76 +65,79 @@ jobs:
           FILE_KTS="proj/android/app/build.gradle.kts"
           FILE_GROOVY="proj/android/app/build.gradle"
 
-          if [ -f "$FILE_KTS" ]; then
-            echo "→ Patching build.gradle.kts"
-            bash -c "python3 - <<'PY'
-import re, pathlib
-p = pathlib.Path('proj/android/app/build.gradle.kts')
-txt = p.read_text(encoding='utf-8')
+          # Пишем патчер в файл (без кавычечных адов)
+          cat > patch_gradle.py <<'PY'
+import re, pathlib, sys
 
-if 'isCoreLibraryDesugaringEnabled' not in txt:
-    txt = re.sub(
-        r'android\\s*\\{',
-        'android {\\n'
-        '    compileOptions {\\n'
-        '        sourceCompatibility = JavaVersion.VERSION_17\\n'
-        '        targetCompatibility = JavaVersion.VERSION_17\\n'
-        '        isCoreLibraryDesugaringEnabled = true\\n'
-        '    }\\n'
-        '    kotlinOptions {\\n'
-        '        jvmTarget = \"17\"\\n'
-        '    }\\n',
-        txt, count=1
-    )
+def patch(path, is_kts: bool):
+    p = pathlib.Path(path)
+    txt = p.read_text(encoding='utf-8')
 
-if 'coreLibraryDesugaring(' not in txt:
-    txt = re.sub(
-        r'dependencies\\s*\\{',
-        'dependencies {\\n'
-        '    coreLibraryDesugaring(\"com.android.tools:desugar_jdk_libs:2.0.4\")\\n',
-        txt, count=1
-    )
+    if is_kts:
+        if 'isCoreLibraryDesugaringEnabled' not in txt:
+            txt = re.sub(
+                r'android\s*\{',
+                'android {\n'
+                '    compileOptions {\n'
+                '        sourceCompatibility = JavaVersion.VERSION_17\n'
+                '        targetCompatibility = JavaVersion.VERSION_17\n'
+                '        isCoreLibraryDesugaringEnabled = true\n'
+                '    }\n'
+                '    kotlinOptions {\n'
+                '        jvmTarget = "17"\n'
+                '    }\n',
+                txt, count=1
+            )
+        if 'coreLibraryDesugaring(' not in txt:
+            txt = re.sub(
+                r'dependencies\s*\{',
+                'dependencies {\n'
+                '    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")\n',
+                txt, count=1
+            )
+    else:
+        if 'coreLibraryDesugaringEnabled' not in txt:
+            txt = re.sub(
+                r'android\s*\{',
+                'android {\n'
+                '    compileOptions {\n'
+                '        sourceCompatibility JavaVersion.VERSION_17\n'
+                '        targetCompatibility JavaVersion.VERSION_17\n'
+                '        coreLibraryDesugaringEnabled true\n'
+                '    }\n'
+                '    kotlinOptions {\n'
+                '        jvmTarget = "17"\n'
+                '    }\n',
+                txt, count=1
+            )
+        if 'coreLibraryDesugaring ' not in txt:
+            txt = re.sub(
+                r'dependencies\s*\{',
+                'dependencies {\n'
+                '    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.0.4"\n',
+                txt, count=1
+            )
 
-p.write_text(txt, encoding='utf-8')
-print('✅ build.gradle.kts patched')
-PY"
-          elif [ -f "$FILE_GROOVY" ]; then
-            echo "→ Patching build.gradle"
-            bash -c "python3 - <<'PY'
-import re, pathlib
-p = pathlib.Path('proj/android/app/build.gradle')
-txt = p.read_text(encoding='utf-8')
+    p.write_text(txt, encoding='utf-8')
+    print(f"✅ Patched {p}")
 
-if 'coreLibraryDesugaringEnabled' not in txt:
-    txt = re.sub(
-        r'android\\s*\\{',
-        'android {\\n'
-        '    compileOptions {\\n'
-        '        sourceCompatibility JavaVersion.VERSION_17\\n'
-        '        targetCompatibility JavaVersion.VERSION_17\\n'
-        '        coreLibraryDesugaringEnabled true\\n'
-        '    }\\n'
-        '    kotlinOptions {\\n'
-        '        jvmTarget = \"17\"\\n'
-        '    }\\n',
-        txt, count=1
-    )
+def main():
+    kts = pathlib.Path("proj/android/app/build.gradle.kts")
+    groovy = pathlib.Path("proj/android/app/build.gradle")
+    if kts.exists():
+        patch(kts, True)
+    elif groovy.exists():
+        patch(groovy, False)
+    else:
+        print("No Gradle file found", file=sys.stderr)
+        sys.exit(1)
 
-if 'coreLibraryDesugaring' not in txt:
-    txt = re.sub(
-        r'dependencies\\s*\\{',
-        'dependencies {\\n'
-        '    coreLibraryDesugaring \"com.android.tools:desugar_jdk_libs:2.0.4\"\\n',
-        txt, count=1
-    )
+if __name__ == "__main__":
+    main()
+PY
 
-p.write_text(txt, encoding='utf-8')
-print('✅ build.gradle patched')
-PY"
-          else
-            echo "⚠️  No app Gradle file found"
-            exit 1
-          fi
+          # Запускаем патчер
+          python3 patch_gradle.py
 
       - name: Build release APK
         shell: bash
@@ -157,6 +150,5 @@ PY"
         uses: actions/upload-artifact@v4
         with:
           name: bp_logger-apk
-          path: |
-            proj/build/app/outputs/flutter-apk/app-release.apk
+          path: proj/build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
