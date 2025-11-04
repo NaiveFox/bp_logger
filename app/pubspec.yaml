@@ -1,9 +1,6 @@
-name: bp_logger
-description: Simple blood pressure logger with charts, filters and stats
+name: bp_logger_plus
+description: Simple blood pressure monitor with charts, export and reminders
 publish_to: "none"
-
-# Версию можешь менять — сборка возьмёт её в название
-version: 1.1.0+3
 
 environment:
   sdk: ">=3.3.0 <4.0.0"
@@ -11,14 +8,13 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-
-  # --- наши библиотеки ---
   intl: ^0.19.0
   shared_preferences: ^2.2.3
   fl_chart: ^0.66.2
-
-  # опционально (иконки iOS-стиля, ничего не ломает)
-  cupertino_icons: ^1.0.8
+  share_plus: ^10.0.2
+  flutter_local_notifications: ^17.2.3
+  timezone: ^0.9.2
+  flutter_native_timezone: ^2.0.0
 
 dev_dependencies:
   flutter_test:
@@ -27,10 +23,3 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
-  # Если позже добавим картинки/шрифты — подключим тут:
-  # assets:
-  #   - assets/
-  # fonts:
-  #   - family: Inter
-  #     fonts:
-  #       - asset: assets/fonts/Inter-Regular.ttf
