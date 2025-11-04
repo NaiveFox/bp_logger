@@ -55,8 +55,8 @@ jobs:
         run: |
           set -e
           echo "🔧 patch gradle for Java 17 + desugaring"
-          python3 - <<'PY'
-import re, pathlib, sys
+          python3 - <<'PY'          
+          import re, pathlib, sys
 
 def patch(path, is_kts: bool):
     p = pathlib.Path(path)
@@ -67,7 +67,7 @@ def patch(path, is_kts: bool):
             txt = re.sub(
                 r'android\s*\{',
                 'android {\n'
-                '    compileOptions {\n'
+                '    compileOptins {\n'
                 '        sourceCompatibility = JavaVersion.VERSION_17\n'
                 '        targetCompatibility = JavaVersion.VERSION_17\n'
                 '        isCoreLibraryDesugaringEnabled = true\n'
