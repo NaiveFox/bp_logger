@@ -1,4 +1,4 @@
-name: Build Android APK (stable)
+name: Build Android APK (stable + desugaring)
 
 on:
   push:
@@ -22,7 +22,7 @@ jobs:
       - name: Set up Flutter (stable)
         uses: subosito/flutter-action@v2
         with:
-          channel: "stable"     # 3.24.x на момент написания
+          channel: "stable"
           cache: true
 
       - name: Flutter doctor
@@ -35,33 +35,110 @@ jobs:
         shell: bash
         run: |
           set -e
-
-          # 1) Создаём чистый каркас, куда положим наш код
           rm -rf proj
           flutter create -t app proj
 
-          # 2) Подменяем код и pubspec на наши
+          # Подменяем наш код
           rm -rf proj/lib
           cp -r app/lib proj/lib
           cp app/pubspec.yaml proj/pubspec.yaml
 
-          # 3) (Опционально) Переименуем приложение, если файл есть
+          # (Опционально) Имя приложения, если есть strings.xml
           STR=proj/android/app/src/main/res/values/strings.xml
           if [ -f "$STR" ]; then
-            sed -i 's#<string name="app_name">.*</string>#<string name="app_name">Мониторинг Давления</string>#' "$STR" || true
+            sed -i 's#<string name="app_name">.*</string>#<string name="app_name">Мониторинг давления</string>#' "$STR" || true
           fi
 
-          # 4) Забираем зависимости
-          (cd proj && flutter pub get)
+      - name: Enable core library desugaring (AGP8, KTS/Gradle)
+        shell: bash
+        run: |
+          set -e
+
+          enable_desugaring_kts() {
+            PYTHON_CODE=$(cat <<'PY'
+import re, sys, pathlib
+p = pathlib.Path("proj/android/app/build.gradle.kts")
+txt = p.read_text(encoding="utf-8")
+
+def ensure_android_block(s):
+    if "android {" not in s:
+        return s + "\nandroid {\n}\n"
+    return s
+
+def inject_android_options(s):
+    # compileOptions + kotlinOptions
+    if "compileOptions" not in s or "isCoreLibraryDesugaringEnabled" not in s:
+        s = re.sub(r'android\s*\{', 'android {\n    compileOptions {\n        sourceCompatibility = JavaVersion.VERSION_17\n        targetCompatibility = JavaVersion.VERSION_17\n        isCoreLibraryDesugaringEnabled = true\n    }\n    kotlinOptions {\n        jvmTarget = "17"\n    }\n', s, count=1)
+    return s
+
+def inject_dependency(s):
+    if "coreLibraryDesugaring(" not in s:
+        s = re.sub(r'dependencies\s*\{', 'dependencies {\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")\n', s, count=1)
+    return s
+
+s = txt
+s = ensure_android_block(s)
+s = inject_android_options(s)
+s = inject_dependency(s)
+p.write_text(s, encoding="utf-8")
+print("KTS patched")
+PY
+)
+            python - <<'PY'
+{{PYTHON_CODE}}
+PY
+          }
+
+          enable_desugaring_groovy() {
+            PYTHON_CODE=$(cat <<'PY'
+import re, sys, pathlib
+p = pathlib.Path("proj/android/app/build.gradle")
+txt = p.read_text(encoding="utf-8")
+
+def ensure_android_block(s):
+    if re.search(r'^\s*android\s*\{', s, flags=re.M) is None:
+        s += "\nandroid {\n}\n"
+    return s
+
+def inject_android_options(s):
+    if "isCoreLibraryDesugaringEnabled" not in s:
+        s = re.sub(r'android\s*\{', 'android {\n    compileOptions {\n        sourceCompatibility JavaVersion.VERSION_17\n        targetCompatibility JavaVersion.VERSION_17\n        coreLibraryDesugaringEnabled true\n    }\n    kotlinOptions {\n        jvmTarget = "17"\n    }\n', s, count=1)
+    return s
+
+def inject_dependency(s):
+    if "coreLibraryDesugaring" not in s:
+        s = re.sub(r'dependencies\s*\{', 'dependencies {\n    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.0.4"\n', s, count=1)
+    return s
+
+s = txt
+s = ensure_android_block(s)
+s = inject_android_options(s)
+s = inject_dependency(s)
+p.write_text(s, encoding="utf-8")
+print("Groovy patched")
+PY
+)
+            python - <<'PY'
+{{PYTHON_CODE}}
+PY
+          }
+
+          if [ -f proj/android/app/build.gradle.kts ]; then
+            enable_desugaring_kts
+          elif [ -f proj/android/app/build.gradle ]; then
+            enable_desugaring_groovy
+          else
+            echo "No app Gradle found" && exit 1
+          fi
 
       - name: Resolve dependencies
         run: |
+          set -e
           cd proj
           flutter pub get
 
       - name: Build release APK
         env:
-          # иногда gradle любит больше памяти на runner’е
           GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8"
         run: |
           set -e
@@ -69,7 +146,6 @@ jobs:
           flutter build apk --release -v
 
       - name: Upload artifact
-        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: bp_logger-apk
