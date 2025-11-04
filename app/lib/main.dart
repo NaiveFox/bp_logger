@@ -1,43 +1,46 @@
 import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:fl_chart/fl_chart.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:timezone/data/latest_all.dart' as tz;
+import 'package:timezone/timezone.dart' as tz;
+import 'package:flutter_native_timezone/flutter_native_timezone.dart';
 
-void main() => runApp(const BPLoggerApp());
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await _Notifications.ensureInit();
+  runApp(const BPApp());
+}
 
-class BPLoggerApp extends StatelessWidget {
-  const BPLoggerApp({super.key});
-
+class BPApp extends StatelessWidget {
+  const BPApp({super.key});
   @override
   Widget build(BuildContext context) {
-    final seed = const Color(0xFF7B5BE6);
     return MaterialApp(
-      title: 'BP Logger+',
-      debugShowCheckedModeBanner: false,
+      title: 'Мониторинг Давления',
       theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF6C47A3)),
         useMaterial3: true,
-        colorScheme: ColorScheme.fromSeed(seedColor: seed),
-        inputDecorationTheme: const InputDecorationTheme(
-          border: OutlineInputBorder(),
-          isDense: true,
-          contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        ),
       ),
-      home: const BPHomePage(),
+      home: const HomeScreen(),
     );
   }
 }
 
-/// ----- Модель -----
+/// ====== Модель ======
 class BPRecord {
-  final DateTime ts; // дата измерения (локальная)
+  final DateTime ts;
   final int sys;
   final int dia;
   final int? pulse;
   final String? note;
 
-  const BPRecord({
+  BPRecord({
     required this.ts,
     required this.sys,
     required this.dia,
@@ -54,540 +57,573 @@ class BPRecord {
       };
 
   factory BPRecord.fromMap(Map<String, dynamic> m) => BPRecord(
-        ts: DateTime.parse(m['ts'] as String).toLocal(),
-        sys: (m['sys'] as num).toInt(),
-        dia: (m['dia'] as num).toInt(),
+        ts: DateTime.parse(m['ts'] as String),
+        sys: m['sys'] as int,
+        dia: m['dia'] as int,
         pulse: (m['pulse'] as num?)?.toInt(),
         note: m['note'] as String?,
       );
 }
 
-/// ----- Хранилище -----
-class BPStorage {
+/// ====== Хранилище ======
+class BPStore {
   static const _key = 'bp_records_v2';
-
   static Future<List<BPRecord>> load() async {
     final sp = await SharedPreferences.getInstance();
     final raw = sp.getString(_key);
     if (raw == null || raw.isEmpty) return [];
-    final list = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
-    return list.map(BPRecord.fromMap).toList();
+    final list = (jsonDecode(raw) as List).cast<Map>().map((e) => e.cast<String, dynamic>()).toList();
+    final out = list.map(BPRecord.fromMap).toList();
+    out.sort((a, b) => b.ts.compareTo(a.ts)); // свежее сверху
+    return out;
   }
 
   static Future<void> save(List<BPRecord> items) async {
+    items.sort((a, b) => b.ts.compareTo(a.ts));
     final sp = await SharedPreferences.getInstance();
     final raw = jsonEncode(items.map((e) => e.toMap()).toList());
     await sp.setString(_key, raw);
   }
 }
 
-/// ----- Главная -----
-class BPHomePage extends StatefulWidget {
-  const BPHomePage({super.key});
+/// ====== Уведомления ======
+class _Notifications {
+  static final _plugin = FlutterLocalNotificationsPlugin();
+  static bool _inited = false;
 
-  @override
-  State<BPHomePage> createState() => _BPHomePageState();
+  static Future<void> ensureInit() async {
+    if (_inited) return;
+    final android = const AndroidInitializationSettings('@mipmap/ic_launcher');
+    await _plugin.initialize(const InitializationSettings(android: android));
+    try {
+      tz.initializeTimeZones();
+      final name = await FlutterNativeTimezone.getLocalTimezone();
+      tz.setLocalLocation(tz.getLocation(name));
+    } catch (_) {
+      tz.initializeTimeZones();
+      tz.setLocalLocation(tz.getLocation('UTC'));
+    }
+    _inited = true;
+  }
+
+  static Future<int> scheduleDaily(TimeOfDay tod) async {
+    await ensureInit();
+    final id = DateTime.now().millisecondsSinceEpoch % 0x7fffffff;
+    final now = tz.TZDateTime.now(tz.local);
+    var scheduled = tz.TZDateTime(tz.local, now.year, now.month, now.day, tod.hour, tod.minute);
+    if (scheduled.isBefore(now)) {
+      scheduled = scheduled.add(const Duration(days: 1));
+    }
+    await _plugin.zonedSchedule(
+      id,
+      'Напоминание',
+      'Пора измерить давление',
+      scheduled,
+      const NotificationDetails(
+        android: AndroidNotificationDetails('bp_logger_ch', 'BP Logger'),
+      ),
+      uiLocalNotificationDateInterpretation: UILocalNotificationDateInterpretation.absoluteTime,
+      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+      matchDateTimeComponents: DateTimeComponents.time,
+    );
+    return id;
+  }
+
+  static Future<void> cancel(int id) => _plugin.cancel(id);
+
+  static Future<void> cancelAll() => _plugin.cancelAll();
 }
 
-class _BPHomePageState extends State<BPHomePage> with TickerProviderStateMixin {
-  final _sysCtrl = TextEditingController();
-  final _diaCtrl = TextEditingController();
-  final _pulseCtrl = TextEditingController();
-  final _noteCtrl = TextEditingController();
-  DateTime _pickTs = DateTime.now();
+/// ====== Главный экран ======
+class HomeScreen extends StatefulWidget {
+  const HomeScreen({super.key});
 
-  late final TabController _tabs = TabController(length: 2, vsync: this);
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
 
-  List<BPRecord> _items = [];
-  DateTime? _filterFrom;
-  DateTime? _filterTo;
+enum PeriodPreset { d1, d7, d30, custom }
 
-  List<BPRecord> get _filtered {
-    var list = _items;
-    if (_filterFrom != null || _filterTo != null) {
-      list = list.where((r) {
-        final d = DateTime(r.ts.year, r.ts.month, r.ts.day);
-        final from = _filterFrom != null
-            ? DateTime(_filterFrom!.year, _filterFrom!.month, _filterFrom!.day)
-            : null;
-        final to = _filterTo != null
-            ? DateTime(_filterTo!.year, _filterTo!.month, _filterTo!.day)
-            : null;
-        final okFrom = from == null || !d.isBefore(from);
-        final okTo = to == null || !d.isAfter(to);
-        return okFrom && okTo;
-      }).toList();
-    }
-    // сортировка по дате измерения (новые сверху)
-    list.sort((a, b) => b.ts.compareTo(a.ts));
-    return list;
-  }
+class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateMixin {
+  final _sys = TextEditingController();
+  final _dia = TextEditingController();
+  final _pulse = TextEditingController();
+  final _note = TextEditingController();
+  DateTime _picked = DateTime.now();
+
+  List<BPRecord> _all = [];
+  List<int> _reminderIds = []; // id уведомлений
+
+  // фильтр
+  PeriodPreset _preset = PeriodPreset.d7;
+  DateTimeRange? _custom;
+
+  TabController? _tabs;
 
   @override
   void initState() {
     super.initState();
+    _tabs = TabController(length: 2, vsync: this);
     _load();
   }
 
   Future<void> _load() async {
-    final data = await BPStorage.load();
-    data.sort((a, b) => b.ts.compareTo(a.ts));
-    setState(() => _items = data);
+    final list = await BPStore.load();
+    final sp = await SharedPreferences.getInstance();
+    _reminderIds = sp.getStringList('reminders')?.map(int.parse).toList() ?? [];
+    setState(() => _all = list);
   }
 
-  Future<void> _saveRecord() async {
-    final sys = int.tryParse(_sysCtrl.text.trim());
-    final dia = int.tryParse(_diaCtrl.text.trim());
-    final pulse = _pulseCtrl.text.trim().isEmpty
-        ? null
-        : int.tryParse(_pulseCtrl.text.trim());
-    if (sys == null || dia == null) {
-      _snack('Укажи SYS и DIA, котёнок 🐾');
-      return;
-    }
-    if (sys < 60 || sys > 260 || dia < 30 || dia > 180) {
-      _snack('Похоже на опечатку: проверь значения');
-      return;
-    }
-
-    final rec = BPRecord(
-      ts: _pickTs,
-      sys: sys,
-      dia: dia,
-      pulse: pulse,
-      note: _noteCtrl.text.trim().isEmpty ? null : _noteCtrl.text.trim(),
-    );
-    setState(() {
-      _items.add(rec);
-      _items.sort((a, b) => b.ts.compareTo(a.ts));
-    });
-    await BPStorage.save(_items);
-    _sysCtrl.clear();
-    _diaCtrl.clear();
-    _pulseCtrl.clear();
-    _noteCtrl.clear();
-    _pickTs = DateTime.now();
-    _snack('Сохранил ✨');
+  Future<void> _saveReminders() async {
+    final sp = await SharedPreferences.getInstance();
+    await sp.setStringList('reminders', _reminderIds.map((e) => e.toString()).toList());
   }
 
-  void _snack(String msg) =>
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
-
-  Future<void> _pickDateTime() async {
+  List<BPRecord> get _filtered {
     final now = DateTime.now();
-    final d = await showDatePicker(
-      context: context,
-      initialDate: _pickTs,
-      firstDate: DateTime(now.year - 2),
-      lastDate: DateTime(now.year + 2),
-    );
-    if (d == null) return;
-    final t = await showTimePicker(
-      context: context,
-      initialTime: TimeOfDay.fromDateTime(_pickTs),
-    );
-    if (t == null) return;
-    setState(() {
-      _pickTs = DateTime(d.year, d.month, d.day, t.hour, t.minute);
-    });
+    DateTime from;
+    DateTime to;
+    switch (_preset) {
+      case PeriodPreset.d1:
+        from = now.subtract(const Duration(days: 1));
+        to = now;
+        break;
+      case PeriodPreset.d7:
+        from = now.subtract(const Duration(days: 7));
+        to = now;
+        break;
+      case PeriodPreset.d30:
+        from = now.subtract(const Duration(days: 30));
+        to = now;
+        break;
+      case PeriodPreset.custom:
+        final r = _custom ??
+            DateTimeRange(start: now.subtract(const Duration(days: 7)), end: now);
+        from = r.start;
+        to = r.end;
+        break;
+    }
+    return _all.where((e) => !e.ts.isBefore(from) && !e.ts.isAfter(to)).toList()
+      ..sort((a, b) => b.ts.compareTo(a.ts));
   }
 
-  Future<void> _pickFilter() async {
-    final range = await showDateRangePicker(
+  Future<void> _pickCustomRange() async {
+    final r = await showDateRangePicker(
       context: context,
-      firstDate: DateTime(DateTime.now().year - 2),
-      lastDate: DateTime(DateTime.now().year + 2),
-      initialDateRange: _filterFrom != null && _filterTo != null
-          ? DateTimeRange(start: _filterFrom!, end: _filterTo!)
-          : null,
+      firstDate: DateTime(2020, 1, 1),
+      lastDate: DateTime.now().add(const Duration(days: 365)),
+      initialDateRange: _custom ??
+          DateTimeRange(
+            start: DateTime.now().subtract(const Duration(days: 7)),
+            end: DateTime.now(),
+          ),
+      locale: const Locale('ru', 'RU'),
     );
-    if (range == null) return;
-    setState(() {
-      _filterFrom = range.start;
-      _filterTo = range.end;
-    });
-  }
-
-  void _clearFilter() => setState(() {
-        _filterFrom = null;
-        _filterTo = null;
+    if (r != null) {
+      setState(() {
+        _preset = PeriodPreset.custom;
+        _custom = r;
       });
+    }
+  }
 
-  Future<void> _deleteRecord(int index) async {
-    final rec = _filtered[index];
-    setState(() => _items.removeWhere((r) => identical(r, rec)));
-    await BPStorage.save(_items);
+  Future<void> _add() async {
+    final sys = int.tryParse(_sys.text.trim());
+    final dia = int.tryParse(_dia.text.trim());
+    final pulse = _pulse.text.trim().isEmpty ? null : int.tryParse(_pulse.text.trim());
+    if (sys == null || dia == null) {
+      _snack('Укажи SYS и DIA');
+      return;
+    }
+    final item = BPRecord(ts: _picked, sys: sys, dia: dia, pulse: pulse, note: _note.text.trim().isEmpty ? null : _note.text.trim());
+    final list = List<BPRecord>.from(_all)..add(item);
+    await BPStore.save(list);
+    setState(() {
+      _all = list;
+      _sys.clear();
+      _dia.clear();
+      _pulse.clear();
+      _note.clear();
+      _picked = DateTime.now();
+    });
+  }
+
+  Future<void> _delete(BPRecord r) async {
+    final list = List<BPRecord>.from(_all)..removeWhere((e) => e.ts == r.ts && e.sys == r.sys && e.dia == r.dia && e.pulse == r.pulse && e.note == r.note);
+    await BPStore.save(list);
+    setState(() => _all = list);
+  }
+
+  void _snack(String s) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(s)));
+
+  void _showAverages() {
+    final data = _filtered;
+    if (data.isEmpty) {
+      _snack('Нет данных в выбранном периоде');
+      return;
+    }
+    final avgSys = (data.map((e) => e.sys).reduce((a, b) => a + b) / data.length).toStringAsFixed(0);
+    final avgDia = (data.map((e) => e.dia).reduce((a, b) => a + b) / data.length).toStringAsFixed(0);
+    final hasPulse = data.any((e) => e.pulse != null);
+    final avgPulse = hasPulse
+        ? (data.where((e) => e.pulse != null).map((e) => e.pulse!).reduce((a, b) => a + b) /
+                data.where((e) => e.pulse != null).length)
+            .toStringAsFixed(0)
+        : '—';
+    showModalBottomSheet(
+      context: context,
+      showDragHandle: true,
+      builder: (_) => Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('Средние за период', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+          const SizedBox(height: 12),
+          Text('SYS: $avgSys   DIA: $avgDia   Pulse: $avgPulse'),
+          const SizedBox(height: 8),
+          Text('Записей: ${data.length}'),
+          const SizedBox(height: 12),
+        ]),
+      ),
+    );
+  }
+
+  Future<void> _exportCsvShare() async {
+    final dfDate = DateFormat('yyyy-MM-dd HH:mm');
+    final rows = <String>['timestamp,sys,dia,pulse,note'];
+    for (final r in _filtered.reversed) {
+      final line =
+          '${dfDate.format(r.ts)},${r.sys},${r.dia},${r.pulse ?? ""},"${(r.note ?? "").replaceAll('"', '""')}"';
+      rows.add(line);
+    }
+    final csv = rows.join('\n');
+    final bytes = Uint8List.fromList(utf8.encode(csv));
+    final xfile = XFile.fromData(bytes,
+        mimeType: 'text/csv', name: 'bp_${DateTime.now().millisecondsSinceEpoch}.csv');
+    await Share.shareXFiles([xfile], text: 'Экспорт давления (выбранный период)');
+  }
+
+  Future<void> _addReminder() async {
+    final t = await showTimePicker(context: context, initialTime: const TimeOfDay(hour: 9, minute: 0));
+    if (t == null) return;
+    final id = await _Notifications.scheduleDaily(t);
+    setState(() => _reminderIds.add(id));
+    await _saveReminders();
+    _snack('Напоминание добавлено: ${t.format(context)} ежедневно');
+  }
+
+  Future<void> _clearReminders() async {
+    await _Notifications.cancelAll();
+    setState(() => _reminderIds.clear());
+    await _saveReminders();
+    _snack('Все напоминания удалены');
+  }
+
+  String _periodLabel() {
+    switch (_preset) {
+      case PeriodPreset.d1:
+        return '24 часа';
+      case PeriodPreset.d7:
+        return '7 дней';
+      case PeriodPreset.d30:
+        return '30 дней';
+      case PeriodPreset.custom:
+        final r = _custom!;
+        return '${DateFormat('dd.MM').format(r.start)}–${DateFormat('dd.MM').format(r.end)}';
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     final df = DateFormat('yyyy-MM-dd HH:mm');
-    final title = 'BP Logger+';
-
     return Scaffold(
       appBar: AppBar(
-        title: Text(title),
+        title: const Text('BP Logger+'),
         actions: [
           IconButton(
-            tooltip: 'Фильтр по датам',
-            onPressed: _pickFilter,
-            icon: const Icon(Icons.filter_alt),
+            tooltip: 'Экспорт CSV',
+            onPressed: _exportCsvShare,
+            icon: const Icon(Icons.ios_share_rounded),
           ),
-          if (_filterFrom != null || _filterTo != null)
-            IconButton(
-              tooltip: 'Сбросить фильтр',
-              onPressed: _clearFilter,
-              icon: const Icon(Icons.filter_alt_off),
-            ),
+          PopupMenuButton<String>(
+            tooltip: 'Фильтр',
+            onSelected: (v) {
+              if (v == 'custom') {
+                _pickCustomRange();
+              } else {
+                setState(() => _preset = {
+                      'd1': PeriodPreset.d1,
+                      'd7': PeriodPreset.d7,
+                      'd30': PeriodPreset.d30,
+                    }[v]!);
+              }
+            },
+            itemBuilder: (_) => [
+              const PopupMenuItem(value: 'd1', child: Text('24 часа')),
+              const PopupMenuItem(value: 'd7', child: Text('7 дней')),
+              const PopupMenuItem(value: 'd30', child: Text('30 дней')),
+              const PopupMenuItem(value: 'custom', child: Text('Выбрать период…')),
+            ],
+            icon: const Icon(Icons.filter_alt_rounded),
+          ),
         ],
         bottom: TabBar(
           controller: _tabs,
-          tabs: const [
-            Tab(text: 'Список'),
-            Tab(text: 'Графики'),
-          ],
+          tabs: const [Tab(text: 'Список'), Tab(text: 'Графики')],
         ),
       ),
-
-      // Поля ввода + список / графики
       body: TabBarView(
         controller: _tabs,
         children: [
-          // ----- Список -----
-          Column(
-            children: [
-              const SizedBox(height: 8),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 12),
-                child: _InputCard(
-                  sysCtrl: _sysCtrl,
-                  diaCtrl: _diaCtrl,
-                  pulseCtrl: _pulseCtrl,
-                  noteCtrl: _noteCtrl,
-                  ts: _pickTs,
-                  onPickTs: _pickDateTime,
-                ),
-              ),
-              const SizedBox(height: 8),
-              _StatsBar(records: _filtered),
-              const Divider(height: 1),
-              Expanded(
-                child: _filtered.isEmpty
-                    ? const Center(child: Text('Пока пусто. Добавь первую запись.'))
-                    : ListView.separated(
-                        itemCount: _filtered.length,
-                        separatorBuilder: (_, __) => const Divider(height: 1),
-                        itemBuilder: (context, i) {
-                          final r = _filtered[i];
-                          return ListTile(
-                            title: Text('${r.sys}/${r.dia}'
-                                '${r.pulse == null ? '' : '  •  ${r.pulse} bpm'}'),
-                            subtitle: Text('${df.format(r.ts)}'
-                                '${r.note == null ? '' : '\n${r.note}'}'),
-                            trailing: IconButton(
-                              icon: const Icon(Icons.delete_outline),
-                              onPressed: () => _deleteRecord(i),
-                            ),
-                          );
-                        },
+          // ======== Список / Ввод ========
+          SingleChildScrollView(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              children: [
+                _inputCard(df),
+                const SizedBox(height: 12),
+                _periodChips(),
+                const SizedBox(height: 8),
+                if (_filtered.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.all(24),
+                    child: Text('Нет записей в выбранном периоде'),
+                  ),
+                ..._filtered.map((r) => Card(
+                      child: ListTile(
+                        title: Text('${r.sys}/${r.dia}  ${r.pulse != null ? ' • ${r.pulse} bpm' : ''}'),
+                        subtitle: Text(df.format(r.ts) + (r.note?.isNotEmpty == true ? '\n${r.note}' : '')),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.delete_outline),
+                          onPressed: () => _delete(r),
+                        ),
                       ),
-              ),
-              const SizedBox(height: 88), // запас под кнопку
-            ],
+                    )),
+                const SizedBox(height: 84),
+              ],
+            ),
           ),
-
-          // ----- Графики -----
-          _ChartsTab(records: _filtered),
+          // ======== Графики ========
+          SingleChildScrollView(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              children: [
+                _chartCard('Систолическое (SYS)', _filtered, (r) => r.sys),
+                const SizedBox(height: 12),
+                _chartCard('Диастолическое (DIA)', _filtered, (r) => r.dia),
+                if (_filtered.any((e) => e.pulse != null)) ...[
+                  const SizedBox(height: 12),
+                  _chartCard('Пульс', _filtered.where((e) => e.pulse != null).toList(), (r) => r.pulse!),
+                ],
+                const SizedBox(height: 96),
+              ],
+            ),
+          ),
         ],
       ),
-
-      // Фиксированная кнопка "Сохранить"
       bottomNavigationBar: SafeArea(
-        child: Container(
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-          color: Theme.of(context).colorScheme.surface,
-          child: SizedBox(
-            width: double.infinity,
-            child: ElevatedButton.icon(
-              icon: const Icon(Icons.check),
-              label: const Text('Сохранить'),
-              onPressed: _saveRecord,
-            ),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+          child: Row(
+            children: [
+              Expanded(
+                child: FilledButton.icon(
+                  onPressed: _add,
+                  icon: const Icon(Icons.check_rounded),
+                  label: const Text('Сохранить'),
+                  style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(48)),
+                ),
+              ),
+              const SizedBox(width: 12),
+              IconButton(
+                tooltip: 'Средние за период',
+                onPressed: _showAverages,
+                icon: const Icon(Icons.functions_rounded),
+              ),
+              const SizedBox(width: 4),
+              PopupMenuButton<String>(
+                tooltip: 'Напоминания',
+                onSelected: (v) {
+                  if (v == 'add') _addReminder();
+                  if (v == 'clear') _clearReminders();
+                },
+                itemBuilder: (_) => [
+                  PopupMenuItem(
+                    value: 'add',
+                    child: Row(children: const [Icon(Icons.alarm_add_outlined), SizedBox(width: 8), Text('Добавить напоминание')]),
+                  ),
+                  PopupMenuItem(
+                    value: 'clear',
+                    child: Row(children: const [Icon(Icons.alarm_off_outlined), SizedBox(width: 8), Text('Удалить все напоминания')]),
+                  ),
+                ],
+                icon: const Icon(Icons.alarm_rounded),
+              ),
+            ],
           ),
         ),
       ),
     );
   }
-}
 
-/// ----- Виджеты ввода -----
-class _InputCard extends StatelessWidget {
-  final TextEditingController sysCtrl;
-  final TextEditingController diaCtrl;
-  final TextEditingController pulseCtrl;
-  final TextEditingController noteCtrl;
-  final DateTime ts;
-  final VoidCallback onPickTs;
-
-  const _InputCard({
-    required this.sysCtrl,
-    required this.diaCtrl,
-    required this.pulseCtrl,
-    required this.noteCtrl,
-    required this.ts,
-    required this.onPickTs,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final df = DateFormat('yyyy-MM-dd HH:mm');
+  Widget _inputCard(DateFormat df) {
     return Card(
-      elevation: 0,
-      surfaceTintColor: Colors.transparent,
       child: Padding(
         padding: const EdgeInsets.all(12),
-        child: LayoutBuilder(
-          builder: (context, c) {
-            final isNarrow = c.maxWidth < 480;
-            final spacing = const SizedBox(width: 12, height: 12);
-            final rowChildren = <Widget>[
-              Expanded(
-                child: TextField(
-                  controller: sysCtrl,
-                  keyboardType: TextInputType.number,
-                  decoration: const InputDecoration(
-                    labelText: 'SYS',
-                    hintText: '120',
-                  ),
-                ),
-              ),
-              spacing,
-              Expanded(
-                child: TextField(
-                  controller: diaCtrl,
-                  keyboardType: TextInputType.number,
-                  decoration: const InputDecoration(
-                    labelText: 'DIA',
-                    hintText: '80',
-                  ),
-                ),
-              ),
-              spacing,
-              Expanded(
-                child: TextField(
-                  controller: pulseCtrl,
-                  keyboardType: TextInputType.number,
-                  decoration: const InputDecoration(
-                    labelText: 'Pulse',
-                    hintText: '70',
-                  ),
-                ),
-              ),
-            ];
-
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
+        child: Column(
+          children: [
+            TextField(
+              controller: _sys,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: 'SYS'),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _dia,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: 'DIA'),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _pulse,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: 'Пульс (необязательно)'),
+            ),
+            const SizedBox(height: 8),
+            Row(
               children: [
-                isNarrow
-                    ? Column(
-                        children: [
-                          Row(children: [rowChildren[0], rowChildren[1]]),
-                          spacing,
-                          Row(children: [rowChildren[2]]),
-                        ],
-                      )
-                    : Row(children: rowChildren),
-                const SizedBox(height: 12),
-                Row(
-                  children: [
-                    Expanded(
-                      child: TextField(
-                        controller: noteCtrl,
-                        decoration: const InputDecoration(
-                          labelText: 'Примечание (необязательно)',
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    FilledButton.tonalIcon(
-                      onPressed: onPickTs,
-                      icon: const Icon(Icons.calendar_today),
-                      label: Text(df.format(ts)),
-                    ),
-                  ],
+                Expanded(
+                  child: TextField(
+                    controller: _note,
+                    decoration: const InputDecoration(labelText: 'Примечание (необязательно)'),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                FilledButton.tonalIcon(
+                  onPressed: () async {
+                    final d = await showDatePicker(
+                      context: context,
+                      initialDate: _picked,
+                      firstDate: DateTime(2020, 1, 1),
+                      lastDate: DateTime.now().add(const Duration(days: 365)),
+                      locale: const Locale('ru', 'RU'),
+                    );
+                    if (d == null) return;
+                    final t = await showTimePicker(
+                      context: context,
+                      initialTime: TimeOfDay.fromDateTime(_picked),
+                    );
+                    if (t == null) return;
+                    setState(() => _picked = DateTime(d.year, d.month, d.day, t.hour, t.minute));
+                  },
+                  icon: const Icon(Icons.event_rounded),
+                  label: Text(DateFormat('yyyy-MM-dd HH:mm').format(_picked)),
                 ),
               ],
-            );
-          },
+            ),
+          ],
         ),
       ),
     );
   }
-}
 
-/// ----- Верхняя панель со средними -----
-class _StatsBar extends StatelessWidget {
-  final List<BPRecord> records;
-  const _StatsBar({required this.records});
-
-  Map<String, num?> _calcAvg(Duration span) {
-    final now = DateTime.now();
-    final from = now.subtract(span);
-    final sel = records.where((r) => r.ts.isAfter(from)).toList();
-    if (sel.isEmpty) return {'sys': null, 'dia': null, 'pulse': null};
-    num avgSys = 0, avgDia = 0, avgPulse = 0;
-    var cntPulse = 0;
-    for (final r in sel) {
-      avgSys += r.sys;
-      avgDia += r.dia;
-      if (r.pulse != null) {
-        avgPulse += r.pulse!;
-        cntPulse++;
-      }
-    }
-    return {
-      'sys': (avgSys / sel.length),
-      'dia': (avgDia / sel.length),
-      'pulse': cntPulse == 0 ? null : (avgPulse / cntPulse),
-    };
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final day = _calcAvg(const Duration(days: 1));
-    final week = _calcAvg(const Duration(days: 7));
-    final month = _calcAvg(const Duration(days: 30));
-
-    Widget cell(String title, Map<String, num?> v) => Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(title,
-                style: Theme.of(context)
-                    .textTheme
-                    .labelMedium
-                    ?.copyWith(color: Theme.of(context).colorScheme.primary)),
-            const SizedBox(height: 4),
-            Text(
-              [
-                v['sys'] == null || v['dia'] == null
-                    ? '—'
-                    : '${v['sys']!.round()}/${v['dia']!.round()}',
-                if (v['pulse'] != null) '· ${v['pulse']!.round()} bpm',
-              ].join('  '),
-              style: Theme.of(context).textTheme.bodyLarge,
-            ),
-          ],
-        );
-
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 6, 12, 10),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Expanded(child: cell('24 часа', day)),
-          Expanded(child: cell('7 дней', week)),
-          Expanded(child: cell('30 дней', month)),
-        ],
-      ),
+  Widget _periodChips() {
+    return Row(
+      children: [
+        ChoiceChip(
+          selected: _preset == PeriodPreset.d1,
+          label: const Text('24 часа'),
+          onSelected: (_) => setState(() => _preset = PeriodPreset.d1),
+        ),
+        const SizedBox(width: 8),
+        ChoiceChip(
+          selected: _preset == PeriodPreset.d7,
+          label: const Text('7 дней'),
+          onSelected: (_) => setState(() => _preset = PeriodPreset.d7),
+        ),
+        const SizedBox(width: 8),
+        ChoiceChip(
+          selected: _preset == PeriodPreset.d30,
+          label: const Text('30 дней'),
+          onSelected: (_) => setState(() => _preset = PeriodPreset.d30),
+        ),
+        const SizedBox(width: 8),
+        ActionChip(
+          label: Text('Период: ${_periodLabel()}'),
+          onPressed: _pickCustomRange,
+        ),
+      ],
     );
   }
-}
 
-/// ----- Вкладка с графиками -----
-class _ChartsTab extends StatelessWidget {
-  final List<BPRecord> records;
-  const _ChartsTab({required this.records});
-
-  @override
-  Widget build(BuildContext context) {
-    if (records.isEmpty) {
-      return const Center(child: Text('Нет данных для графиков'));
-    }
-    final sorted = [...records]..sort((a, b) => a.ts.compareTo(b.ts));
-
-    // Преобразуем в точки
-    final base = sorted.first.ts.millisecondsSinceEpoch.toDouble();
-    List<FlSpot> sSys = [], sDia = [], sPulse = [];
-    for (final r in sorted) {
-      final x = (r.ts.millisecondsSinceEpoch.toDouble() - base) / 86400000.0; // дни
-      sSys.add(FlSpot(x, r.sys.toDouble()));
-      sDia.add(FlSpot(x, r.dia.toDouble()));
-      if (r.pulse != null) sPulse.add(FlSpot(x, r.pulse!.toDouble()));
-    }
-
-    Widget chart(String title, List<FlSpot> spots,
-        {double minY = 40, double maxY = 260}) {
+  Widget _chartCard(String title, List<BPRecord> list, int Function(BPRecord) getY) {
+    if (list.isEmpty) {
       return Card(
-        elevation: 0,
-        margin: const EdgeInsets.fromLTRB(12, 12, 12, 4),
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(8, 8, 16, 12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 8.0, vertical: 4),
-                child: Text(title,
-                    style: Theme.of(context).textTheme.titleMedium),
-              ),
-              SizedBox(
-                height: 220,
-                child: LineChart(
-                  LineChartData(
-                    minY: minY,
-                    maxY: maxY,
-                    lineTouchData: const LineTouchData(enabled: true),
-                    gridData: const FlGridData(show: true),
-                    titlesData: FlTitlesData(
-                      leftTitles: const AxisTitles(
-                        sideTitles: SideTitles(showTitles: true, reservedSize: 36),
-                      ),
-                      bottomTitles: AxisTitles(
-                        sideTitles: SideTitles(
-                          showTitles: true,
-                          interval: (spots.length / 6).clamp(1, 7).toDouble(),
-                          getTitlesWidget: (v, meta) {
-                            final millis = base + v * 86400000.0;
-                            final d =
-                                DateTime.fromMillisecondsSinceEpoch(millis.toInt());
-                            return Padding(
-                              padding: const EdgeInsets.only(top: 6),
-                              child: Text(DateFormat('MM-dd').format(d),
-                                  style: Theme.of(context).textTheme.labelSmall),
-                            );
-                          },
-                        ),
-                      ),
-                      topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                      rightTitles:
-                          const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                    ),
-                    borderData: FlBorderData(show: true),
-                    lineBarsData: [
-                      LineChartBarData(
-                        spots: spots,
-                        isCurved: true,
-                        dotData: const FlDotData(show: false),
-                        barWidth: 3,
-                      )
-                    ],
-                  ),
-                ),
-              ),
-            ],
-          ),
+          padding: const EdgeInsets.all(16),
+          child: Row(children: [Text('$title — нет данных')]),
         ),
       );
     }
+    final xs = list.map((e) => e.ts.millisecondsSinceEpoch.toDouble()).toList();
+    final ys = list.map(getY).map((e) => e.toDouble()).toList();
 
-    return ListView(
-      children: [
-        chart('Систолическое (SYS)', sSys, minY: 70, maxY: 260),
-        chart('Диастолическое (DIA)', sDia, minY: 40, maxY: 180),
-        if (sPulse.isNotEmpty) chart('Пульс', sPulse, minY: 40, maxY: 180),
-        const SizedBox(height: 16),
-      ],
+    final minX = xs.reduce((a, b) => a < b ? a : b);
+    final maxX = xs.reduce((a, b) => a > b ? a : b);
+    final minY = ys.reduce((a, b) => a < b ? a : b) - 5;
+    final maxY = ys.reduce((a, b) => a > b ? a : b) + 5;
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 16, 12, 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(title, style: const TextStyle(fontWeight: FontWeight.w600)),
+            const SizedBox(height: 8),
+            SizedBox(
+              height: 240,
+              child: LineChart(
+                LineChartData(
+                  minX: minX,
+                  maxX: maxX,
+                  minY: minY,
+                  maxY: maxY,
+                  lineBarsData: [
+                    LineChartBarData(
+                      isCurved: false,
+                      spots: [
+                        for (var i = 0; i < list.length; i++)
+                          FlSpot(xs[i], ys[i]),
+                      ],
+                      dotData: const FlDotData(show: false),
+                      belowBarData: BarAreaData(show: false),
+                      color: Theme.of(context).colorScheme.primary,
+                      barWidth: 3,
+                    )
+                  ],
+                  gridData: const FlGridData(show: true),
+                  titlesData: FlTitlesData(
+                    leftTitles: const AxisTitles(sideTitles: SideTitles(showTitles: true, reservedSize: 40)),
+                    rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                    topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                    bottomTitles: AxisTitles(
+                      sideTitles: SideTitles(
+                        showTitles: true,
+                        reservedSize: 28,
+                        getTitlesWidget: (value, meta) {
+                          final d = DateTime.fromMillisecondsSinceEpoch(value.toInt());
+                          return Text(DateFormat('MM-dd').format(d), style: const TextStyle(fontSize: 11));
+                        },
+                      ),
+                    ),
+                  ),
+                  borderData: FlBorderData(show: true),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
