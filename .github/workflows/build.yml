@@ -38,10 +38,12 @@ jobs:
           set -e
           rm -rf proj
           flutter create -t app proj
-          # подменяем lib и pubspec.yaml нашими (лежат у тебя в папке app/)
           rm -rf proj/lib
           cp -r app/lib proj/lib
           cp app/pubspec.yaml proj/pubspec.yaml
+          # 👉 имя приложения в лаунчере
+          sed -i 's/<string name="app_name">.*<\/string>/<string name="app_name">Мониторинг Давления<\/string>/' \
+            proj/android/app/src/main/res/values/strings.xml
           cd proj
           flutter pub get
 
