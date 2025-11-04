@@ -17,33 +17,46 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: '17'
 
       - name: Set up Flutter (stable)
         uses: subosito/flutter-action@v2
         with:
-          channel: stable
+          channel: 'stable'
           cache: true
 
-      - name: Flutter doctor
+      - name: Doctor
         run: |
           flutter --version
           flutter doctor -v
           dart --version
 
-      # 👉 Создаём чистый проект и подменяем в нём наши файлы
+      # Готовим чистый проект и копируем наш код
       - name: Prepare clean project
         shell: bash
         run: |
           set -e
           rm -rf proj
           flutter create -t app proj
+          # подменяем lib и pubspec из папки app/
           rm -rf proj/lib
           cp -r app/lib proj/lib
           cp app/pubspec.yaml proj/pubspec.yaml
-          # 👉 имя приложения в лаунчере
-          sed -i 's/<string name="app_name">.*<\/string>/<string name="app_name">Мониторинг Давления<\/string>/' \
-            proj/android/app/src/main/res/values/strings.xml
+
+          # Меняем имя приложения и applicationId
+          # (label надёжнее править в AndroidManifest.xml)
+          sed -i 's/package="com.example.proj"/package="com.naivefox.bp_logger"/' proj/android/app/src/main/AndroidManifest.xml
+          sed -i 's/android:label="@string\/app_name"/android:label="Мониторинг Давления"/' proj/android/app/src/main/AndroidManifest.xml
+
+          # prod название пакета в gradle (applicationId)
+          sed -i 's/applicationId "com.example.proj"/applicationId "com.naivefox.bp_logger"/' proj/android/app/build.gradle
+
+          cd proj
+          flutter pub get
+
+      - name: Resolve dependencies
+        run: |
+          set -e
           cd proj
           flutter pub get
 
@@ -52,9 +65,11 @@ jobs:
         run: |
           set -e
           cd proj
-          flutter build apk --release
+          # Собираем релизный APK (без подписи; это нормально для установки вручную)
+          flutter build apk --release -v
 
       - name: Upload artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: bp_logger-apk
