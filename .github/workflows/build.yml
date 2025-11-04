@@ -1,4 +1,4 @@
-name: Build Android APK (bulletproof)
+name: Build Android APK (stable)
 
 on:
   push:
@@ -17,55 +17,55 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
 
       - name: Set up Flutter (stable)
         uses: subosito/flutter-action@v2
         with:
-          channel: 'stable'
+          channel: "stable"     # 3.24.x на момент написания
           cache: true
 
-      - name: Doctor
+      - name: Flutter doctor
         run: |
           flutter --version
           flutter doctor -v
           dart --version
 
-      # Готовим чистый проект и копируем наш код
       - name: Prepare clean project
         shell: bash
         run: |
           set -e
+
+          # 1) Создаём чистый каркас, куда положим наш код
           rm -rf proj
           flutter create -t app proj
-          # подменяем lib и pubspec из папки app/
+
+          # 2) Подменяем код и pubspec на наши
           rm -rf proj/lib
           cp -r app/lib proj/lib
           cp app/pubspec.yaml proj/pubspec.yaml
 
-          # Меняем имя приложения и applicationId
-          # (label надёжнее править в AndroidManifest.xml)
-          sed -i 's/package="com.example.proj"/package="com.naivefox.bp_logger"/' proj/android/app/src/main/AndroidManifest.xml
-          sed -i 's/android:label="@string\/app_name"/android:label="Мониторинг Давления"/' proj/android/app/src/main/AndroidManifest.xml
+          # 3) (Опционально) Переименуем приложение, если файл есть
+          STR=proj/android/app/src/main/res/values/strings.xml
+          if [ -f "$STR" ]; then
+            sed -i 's#<string name="app_name">.*</string>#<string name="app_name">Мониторинг Давления</string>#' "$STR" || true
+          fi
 
-          # prod название пакета в gradle (applicationId)
-          sed -i 's/applicationId "com.example.proj"/applicationId "com.naivefox.bp_logger"/' proj/android/app/build.gradle
-
-          cd proj
-          flutter pub get
+          # 4) Забираем зависимости
+          (cd proj && flutter pub get)
 
       - name: Resolve dependencies
         run: |
-          set -e
           cd proj
           flutter pub get
 
       - name: Build release APK
-        shell: bash
+        env:
+          # иногда gradle любит больше памяти на runner’е
+          GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8"
         run: |
           set -e
           cd proj
-          # Собираем релизный APK (без подписи; это нормально для установки вручную)
           flutter build apk --release -v
 
       - name: Upload artifact
