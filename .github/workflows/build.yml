@@ -25,7 +25,7 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Flutter doctor
+      - name: Doctor
         run: |
           flutter --version
           flutter doctor -v
@@ -35,38 +35,29 @@ jobs:
         shell: bash
         run: |
           set -e
-          echo "🧹 Creating clean Flutter project"
+          echo "🧹 create clean proj"
           rm -rf proj
           flutter create proj
-
-          echo "📦 Replace sources/pubspec from repo if present"
+          # подкидываем твой код/ресурсы, если есть
           if [ -d app/lib ]; then
             rm -rf proj/lib
             cp -r app/lib proj/lib
           fi
-
           if [ -f app/pubspec.yaml ]; then
             cp app/pubspec.yaml proj/pubspec.yaml
           fi
-
           if [ -d app/assets ]; then
             rm -rf proj/assets
             cp -r app/assets proj/assets
           fi
-
           (cd proj && flutter pub get)
 
-      - name: Enable core library desugaring (AGP8)
+      - name: Enable core library desugaring (AGP8-safe)
         shell: bash
         run: |
           set -e
-          echo "🔧 Enabling core library desugaring..."
-
-          FILE_KTS="proj/android/app/build.gradle.kts"
-          FILE_GROOVY="proj/android/app/build.gradle"
-
-          # Пишем патчер в файл (без кавычечных адов)
-          cat > patch_gradle.py <<'PY'
+          echo "🔧 patch gradle for Java 17 + desugaring"
+          python3 - <<'PY'
 import re, pathlib, sys
 
 def patch(path, is_kts: bool):
@@ -121,23 +112,16 @@ def patch(path, is_kts: bool):
     p.write_text(txt, encoding='utf-8')
     print(f"✅ Patched {p}")
 
-def main():
-    kts = pathlib.Path("proj/android/app/build.gradle.kts")
-    groovy = pathlib.Path("proj/android/app/build.gradle")
-    if kts.exists():
-        patch(kts, True)
-    elif groovy.exists():
-        patch(groovy, False)
-    else:
-        print("No Gradle file found", file=sys.stderr)
-        sys.exit(1)
-
-if __name__ == "__main__":
-    main()
+kts = pathlib.Path("proj/android/app/build.gradle.kts")
+groovy = pathlib.Path("proj/android/app/build.gradle")
+if kts.exists():
+    patch(kts, True)
+elif groovy.exists():
+    patch(groovy, False)
+else:
+    print("No Gradle file found", file=sys.stderr)
+    sys.exit(1)
 PY
-
-          # Запускаем патчер
-          python3 patch_gradle.py
 
       - name: Build release APK
         shell: bash
