@@ -1,19 +1,26 @@
 import 'dart:convert';
-import 'dart:typed_data';
-
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:fl_chart/fl_chart.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-import 'package:timezone/data/latest_all.dart' as tz;
+import 'package:timezone/data/latest.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
-import 'package:flutter_native_timezone/flutter_native_timezone.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await _Notifications.ensureInit();
+  tz.initializeTimeZones();
+  // Пробуем локаль устройства, fallback — Europe/Moscow
+  final localName = DateTime.now().timeZoneName;
+  try {
+    tz.setLocalLocation(tz.getLocation(localName));
+  } catch (_) {
+    tz.setLocalLocation(tz.getLocation('Europe/Moscow'));
+  }
+  await _Notif.init();
   runApp(const BPApp());
 }
 
@@ -22,17 +29,17 @@ class BPApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Мониторинг Давления',
+      title: 'Мониторинг давления',
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF6C47A3)),
         useMaterial3: true,
+        colorSchemeSeed: const Color(0xFF6A5ACD),
+        fontFamily: 'Roboto',
       ),
-      home: const HomeScreen(),
+      home: const Home(),
     );
   }
 }
 
-/// ====== Модель ======
 class BPRecord {
   final DateTime ts;
   final int sys;
@@ -40,590 +47,567 @@ class BPRecord {
   final int? pulse;
   final String? note;
 
-  BPRecord({
-    required this.ts,
-    required this.sys,
-    required this.dia,
-    this.pulse,
-    this.note,
-  });
+  BPRecord({required this.ts, required this.sys, required this.dia, this.pulse, this.note});
 
   Map<String, dynamic> toMap() => {
-        'ts': ts.toIso8601String(),
-        'sys': sys,
-        'dia': dia,
-        'pulse': pulse,
-        'note': note,
-      };
-
+    'ts': ts.toIso8601String(),
+    'sys': sys,
+    'dia': dia,
+    'pulse': pulse,
+    'note': note,
+  };
   factory BPRecord.fromMap(Map<String, dynamic> m) => BPRecord(
-        ts: DateTime.parse(m['ts'] as String),
-        sys: m['sys'] as int,
-        dia: m['dia'] as int,
-        pulse: (m['pulse'] as num?)?.toInt(),
-        note: m['note'] as String?,
-      );
+    ts: DateTime.parse(m['ts'] as String),
+    sys: (m['sys'] as num).toInt(),
+    dia: (m['dia'] as num).toInt(),
+    pulse: (m['pulse'] as num?)?.toInt(),
+    note: m['note'] as String?,
+  );
+
+  static String csvHeader() => 'timestamp;date;time;sys;dia;pulse;note';
+  String toCsv() {
+    final d = DateFormat('yyyy-MM-dd').format(ts);
+    final t = DateFormat('HH:mm').format(ts);
+    return '${ts.toIso8601String()};$d;$t;$sys;$dia;${pulse ?? ''};"${(note ?? '').replaceAll('"', '""')}"';
+  }
 }
 
-/// ====== Хранилище ======
-class BPStore {
+class Repo {
   static const _key = 'bp_records_v2';
   static Future<List<BPRecord>> load() async {
     final sp = await SharedPreferences.getInstance();
     final raw = sp.getString(_key);
     if (raw == null || raw.isEmpty) return [];
-    final list = (jsonDecode(raw) as List).cast<Map>().map((e) => e.cast<String, dynamic>()).toList();
-    final out = list.map(BPRecord.fromMap).toList();
-    out.sort((a, b) => b.ts.compareTo(a.ts)); // свежее сверху
-    return out;
+    final list = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
+    return list.map(BPRecord.fromMap).toList();
   }
 
   static Future<void> save(List<BPRecord> items) async {
-    items.sort((a, b) => b.ts.compareTo(a.ts));
     final sp = await SharedPreferences.getInstance();
     final raw = jsonEncode(items.map((e) => e.toMap()).toList());
     await sp.setString(_key, raw);
   }
 }
 
-/// ====== Уведомления ======
-class _Notifications {
+/// Напоминания
+class _Notif {
   static final _plugin = FlutterLocalNotificationsPlugin();
-  static bool _inited = false;
-
-  static Future<void> ensureInit() async {
-    if (_inited) return;
-    final android = const AndroidInitializationSettings('@mipmap/ic_launcher');
+  static const _channelId = 'reminders_channel';
+  static Future<void> init() async {
+    const android = AndroidInitializationSettings('@mipmap/ic_launcher');
     await _plugin.initialize(const InitializationSettings(android: android));
-    try {
-      tz.initializeTimeZones();
-      final name = await FlutterNativeTimezone.getLocalTimezone();
-      tz.setLocalLocation(tz.getLocation(name));
-    } catch (_) {
-      tz.initializeTimeZones();
-      tz.setLocalLocation(tz.getLocation('UTC'));
-    }
-    _inited = true;
+    await _plugin
+        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+        ?.createNotificationChannel(const AndroidNotificationChannel(
+          _channelId, 'Напоминания', description: 'Напоминания о замерах давления',
+          importance: Importance.high,
+        ));
   }
 
-  static Future<int> scheduleDaily(TimeOfDay tod) async {
-    await ensureInit();
-    final id = DateTime.now().millisecondsSinceEpoch % 0x7fffffff;
-    final now = tz.TZDateTime.now(tz.local);
-    var scheduled = tz.TZDateTime(tz.local, now.year, now.month, now.day, tod.hour, tod.minute);
-    if (scheduled.isBefore(now)) {
-      scheduled = scheduled.add(const Duration(days: 1));
-    }
+  static Future<int> scheduleOnce(DateTime when, String body) async {
+    final id = DateTime.now().millisecondsSinceEpoch.remainder(1<<31);
     await _plugin.zonedSchedule(
       id,
-      'Напоминание',
       'Пора измерить давление',
-      scheduled,
+      body,
+      tz.TZDateTime.from(when, tz.local),
       const NotificationDetails(
-        android: AndroidNotificationDetails('bp_logger_ch', 'BP Logger'),
+        android: AndroidNotificationDetails(_channelId, 'Напоминания',
+            channelDescription: 'Напоминания о замерах давления',
+            priority: Priority.high, importance: Importance.high),
       ),
-      uiLocalNotificationDateInterpretation: UILocalNotificationDateInterpretation.absoluteTime,
       androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+      uiLocalNotificationDateInterpretation:
+          UILocalNotificationDateInterpretation.absoluteTime,
+      matchDateTimeComponents: DateTimeComponents.dateAndTime,
+    );
+    return id;
+  }
+
+  static Future<int> scheduleDaily(TimeOfDay tod, String body) async {
+    final id = DateTime.now().millisecondsSinceEpoch.remainder(1<<31);
+    final now = DateTime.now();
+    var first = DateTime(now.year, now.month, now.day, tod.hour, tod.minute);
+    if (first.isBefore(now)) first = first.add(const Duration(days: 1));
+    await _plugin.zonedSchedule(
+      id,
+      'Ежедневное напоминание',
+      body,
+      tz.TZDateTime.from(first, tz.local),
+      const NotificationDetails(
+        android: AndroidNotificationDetails(_channelId, 'Напоминания',
+            channelDescription: 'Ежедневные напоминания',
+            priority: Priority.high, importance: Importance.high),
+      ),
+      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+      uiLocalNotificationDateInterpretation:
+          UILocalNotificationDateInterpretation.absoluteTime,
       matchDateTimeComponents: DateTimeComponents.time,
     );
     return id;
   }
 
   static Future<void> cancel(int id) => _plugin.cancel(id);
-
-  static Future<void> cancelAll() => _plugin.cancelAll();
 }
 
-/// ====== Главный экран ======
-class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
+/// Храним ID и подпись напоминаний
+class RemindRepo {
+  static const _key = 'bp_reminders_v1';
+  static Future<List<Map<String, dynamic>>> load() async {
+    final sp = await SharedPreferences.getInstance();
+    final raw = sp.getString(_key);
+    if (raw == null || raw.isEmpty) return [];
+    return (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
+  }
+  static Future<void> save(List<Map<String, dynamic>> items) async {
+    final sp = await SharedPreferences.getInstance();
+    await sp.setString(_key, jsonEncode(items));
+  }
+}
 
+enum Period { d24, d7, d30, custom }
+
+class Home extends StatefulWidget {
+  const Home({super.key});
   @override
-  State<HomeScreen> createState() => _HomeScreenState();
+  State<Home> createState() => _HomeState();
 }
 
-enum PeriodPreset { d1, d7, d30, custom }
-
-class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateMixin {
+class _HomeState extends State<Home> with SingleTickerProviderStateMixin {
   final _sys = TextEditingController();
   final _dia = TextEditingController();
   final _pulse = TextEditingController();
   final _note = TextEditingController();
-  DateTime _picked = DateTime.now();
-
+  DateTime _pick = DateTime.now();
   List<BPRecord> _all = [];
-  List<int> _reminderIds = []; // id уведомлений
-
-  // фильтр
-  PeriodPreset _preset = PeriodPreset.d7;
-  DateTimeRange? _custom;
-
-  TabController? _tabs;
+  Period _period = Period.d24;
+  DateTime? _from;
+  DateTime? _to;
+  int _tab = 0;
 
   @override
   void initState() {
     super.initState();
-    _tabs = TabController(length: 2, vsync: this);
     _load();
   }
 
   Future<void> _load() async {
-    final list = await BPStore.load();
-    final sp = await SharedPreferences.getInstance();
-    _reminderIds = sp.getStringList('reminders')?.map(int.parse).toList() ?? [];
-    setState(() => _all = list);
-  }
-
-  Future<void> _saveReminders() async {
-    final sp = await SharedPreferences.getInstance();
-    await sp.setStringList('reminders', _reminderIds.map((e) => e.toString()).toList());
+    _all = (await Repo.load())..sort((a,b)=>b.ts.compareTo(a.ts));
+    setState((){});
   }
 
   List<BPRecord> get _filtered {
+    DateTime from, to;
     final now = DateTime.now();
-    DateTime from;
-    DateTime to;
-    switch (_preset) {
-      case PeriodPreset.d1:
-        from = now.subtract(const Duration(days: 1));
-        to = now;
-        break;
-      case PeriodPreset.d7:
-        from = now.subtract(const Duration(days: 7));
-        to = now;
-        break;
-      case PeriodPreset.d30:
-        from = now.subtract(const Duration(days: 30));
-        to = now;
-        break;
-      case PeriodPreset.custom:
-        final r = _custom ??
-            DateTimeRange(start: now.subtract(const Duration(days: 7)), end: now);
-        from = r.start;
-        to = r.end;
+    switch (_period) {
+      case Period.d24: from = now.subtract(const Duration(hours:24)); to = now; break;
+      case Period.d7:  from = now.subtract(const Duration(days:7));  to = now; break;
+      case Period.d30: from = now.subtract(const Duration(days:30)); to = now; break;
+      case Period.custom:
+        from = _from ?? DateTime(now.year, now.month, now.day).subtract(const Duration(days:7));
+        to   = _to   ?? now;
         break;
     }
-    return _all.where((e) => !e.ts.isBefore(from) && !e.ts.isAfter(to)).toList()
-      ..sort((a, b) => b.ts.compareTo(a.ts));
+    return _all.where((r)=> r.ts.isAfter(from) && r.ts.isBefore(to.add(const Duration(seconds:1)))).toList();
   }
 
-  Future<void> _pickCustomRange() async {
-    final r = await showDateRangePicker(
-      context: context,
-      firstDate: DateTime(2020, 1, 1),
-      lastDate: DateTime.now().add(const Duration(days: 365)),
-      initialDateRange: _custom ??
-          DateTimeRange(
-            start: DateTime.now().subtract(const Duration(days: 7)),
-            end: DateTime.now(),
-          ),
-      locale: const Locale('ru', 'RU'),
-    );
-    if (r != null) {
-      setState(() {
-        _preset = PeriodPreset.custom;
-        _custom = r;
-      });
-    }
+  (double? sys,double? dia) get _avg {
+    final list = _filtered;
+    if (list.isEmpty) return (null, null);
+    final s = list.fold<int>(0,(a,b)=>a+b.sys)/list.length;
+    final d = list.fold<int>(0,(a,b)=>a+b.dia)/list.length;
+    return (s, d);
   }
 
-  Future<void> _add() async {
+  Future<void> _save() async {
     final sys = int.tryParse(_sys.text.trim());
     final dia = int.tryParse(_dia.text.trim());
-    final pulse = _pulse.text.trim().isEmpty ? null : int.tryParse(_pulse.text.trim());
     if (sys == null || dia == null) {
-      _snack('Укажи SYS и DIA');
+      _snack('Нужно ввести SYS и DIA');
       return;
     }
-    final item = BPRecord(ts: _picked, sys: sys, dia: dia, pulse: pulse, note: _note.text.trim().isEmpty ? null : _note.text.trim());
-    final list = List<BPRecord>.from(_all)..add(item);
-    await BPStore.save(list);
+    final pulse = int.tryParse(_pulse.text.trim());
+    final rec = BPRecord(ts: _pick, sys: sys, dia: dia, pulse: pulse, note: _note.text.trim().isEmpty ? null : _note.text.trim());
+    _all.insert(0, rec);
+    await Repo.save(_all);
     setState(() {
-      _all = list;
-      _sys.clear();
-      _dia.clear();
-      _pulse.clear();
-      _note.clear();
-      _picked = DateTime.now();
+      _sys.clear(); _dia.clear(); _pulse.clear(); _note.clear();
+      _pick = DateTime.now();
     });
-  }
-
-  Future<void> _delete(BPRecord r) async {
-    final list = List<BPRecord>.from(_all)..removeWhere((e) => e.ts == r.ts && e.sys == r.sys && e.dia == r.dia && e.pulse == r.pulse && e.note == r.note);
-    await BPStore.save(list);
-    setState(() => _all = list);
+    _snack('Сохранено');
   }
 
   void _snack(String s) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(s)));
 
-  void _showAverages() {
-    final data = _filtered;
-    if (data.isEmpty) {
-      _snack('Нет данных в выбранном периоде');
-      return;
-    }
-    final avgSys = (data.map((e) => e.sys).reduce((a, b) => a + b) / data.length).toStringAsFixed(0);
-    final avgDia = (data.map((e) => e.dia).reduce((a, b) => a + b) / data.length).toStringAsFixed(0);
-    final hasPulse = data.any((e) => e.pulse != null);
-    final avgPulse = hasPulse
-        ? (data.where((e) => e.pulse != null).map((e) => e.pulse!).reduce((a, b) => a + b) /
-                data.where((e) => e.pulse != null).length)
-            .toStringAsFixed(0)
-        : '—';
-    showModalBottomSheet(
+  Future<void> _exportAndShare() async {
+    final list = _filtered..sort((a,b)=>a.ts.compareTo(b.ts)); // для CSV по возрастанию
+    if (list.isEmpty) { _snack('Нет записей для экспорта'); return; }
+    final rows = [
+      BPRecord.csvHeader(),
+      ...list.map((e)=>e.toCsv()),
+    ].join('\n');
+    final dir = Platform.isAndroid
+        ? (await getExternalStorageDirectory())!
+        : await getApplicationDocumentsDirectory();
+    final file = File('${dir.path}/bp_export_${DateFormat('yyyyMMdd_HHmm').format(DateTime.now())}.csv');
+    await file.writeAsString(rows, encoding: const Utf8Codec());
+    await Share.shareXFiles([XFile(file.path)], text: 'Экспорт давления');
+  }
+
+  Future<void> _pickDateTime() async {
+    final d = await showDatePicker(
       context: context,
-      showDragHandle: true,
-      builder: (_) => Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const Text('Средние за период', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
-          const SizedBox(height: 12),
-          Text('SYS: $avgSys   DIA: $avgDia   Pulse: $avgPulse'),
-          const SizedBox(height: 8),
-          Text('Записей: ${data.length}'),
-          const SizedBox(height: 12),
-        ]),
-      ),
+      firstDate: DateTime(2015),
+      lastDate: DateTime(2100),
+      initialDate: _pick,
     );
+    if (d==null) return;
+    final t = await showTimePicker(context: context, initialTime: TimeOfDay(hour: _pick.hour, minute: _pick.minute));
+    final tt = t ?? TimeOfDay.now();
+    setState(()=> _pick = DateTime(d.year, d.month, d.day, tt.hour, tt.minute));
   }
 
-  Future<void> _exportCsvShare() async {
-    final dfDate = DateFormat('yyyy-MM-dd HH:mm');
-    final rows = <String>['timestamp,sys,dia,pulse,note'];
-    for (final r in _filtered.reversed) {
-      final line =
-          '${dfDate.format(r.ts)},${r.sys},${r.dia},${r.pulse ?? ""},"${(r.note ?? "").replaceAll('"', '""')}"';
-      rows.add(line);
+  Future<void> _setPeriod(Period p) async {
+    if (p==Period.custom) {
+      final now = DateTime.now();
+      final df = await showDatePicker(context: context, initialDate: now.subtract(const Duration(days:7)), firstDate: DateTime(2015), lastDate: now);
+      if (df==null) return;
+      final dt = await showDatePicker(context: context, initialDate: now, firstDate: df, lastDate: DateTime(2100));
+      if (dt==null) return;
+      setState(() { _period = p; _from = df; _to = dt.add(const Duration(hours:23, minutes:59)); });
+    } else {
+      setState(()=> _period = p);
     }
-    final csv = rows.join('\n');
-    final bytes = Uint8List.fromList(utf8.encode(csv));
-    final xfile = XFile.fromData(bytes,
-        mimeType: 'text/csv', name: 'bp_${DateTime.now().millisecondsSinceEpoch}.csv');
-    await Share.shareXFiles([xfile], text: 'Экспорт давления (выбранный период)');
   }
 
-  Future<void> _addReminder() async {
-    final t = await showTimePicker(context: context, initialTime: const TimeOfDay(hour: 9, minute: 0));
-    if (t == null) return;
-    final id = await _Notifications.scheduleDaily(t);
-    setState(() => _reminderIds.add(id));
-    await _saveReminders();
-    _snack('Напоминание добавлено: ${t.format(context)} ежедневно');
+  Future<void> _addReminderOnce() async {
+    final d = await showDatePicker(context: context, firstDate: DateTime.now(), lastDate: DateTime(2100), initialDate: DateTime.now());
+    if (d==null) return;
+    final t = await showTimePicker(context: context, initialTime: TimeOfDay.now());
+    if (t==null) return;
+    final when = DateTime(d.year, d.month, d.day, t.hour, t.minute);
+    final id = await _Notif.scheduleOnce(when, DateFormat('dd.MM HH:mm').format(when));
+    final list = await RemindRepo.load();
+    list.add({'id': id, 'type': 'once', 'time': when.toIso8601String()});
+    await RemindRepo.save(list);
+    _snack('Напоминание добавлено');
+    setState((){});
   }
 
-  Future<void> _clearReminders() async {
-    await _Notifications.cancelAll();
-    setState(() => _reminderIds.clear());
-    await _saveReminders();
-    _snack('Все напоминания удалены');
+  Future<void> _addReminderDaily() async {
+    final t = await showTimePicker(context: context, initialTime: TimeOfDay.now());
+    if (t==null) return;
+    final id = await _Notif.scheduleDaily(t, 'Ежедневно в ${t.format(context)}');
+    final list = await RemindRepo.load();
+    list.add({'id': id, 'type': 'daily', 'time': t.format(context)});
+    await RemindRepo.save(list);
+    _snack('Ежедневное напоминание добавлено');
+    setState((){});
   }
 
-  String _periodLabel() {
-    switch (_preset) {
-      case PeriodPreset.d1:
-        return '24 часа';
-      case PeriodPreset.d7:
-        return '7 дней';
-      case PeriodPreset.d30:
-        return '30 дней';
-      case PeriodPreset.custom:
-        final r = _custom!;
-        return '${DateFormat('dd.MM').format(r.start)}–${DateFormat('dd.MM').format(r.end)}';
-    }
+  Future<void> _delReminder(int id) async {
+    await _Notif.cancel(id);
+    final list = await RemindRepo.load();
+    list.removeWhere((e)=> e['id']==id);
+    await RemindRepo.save(list);
+    _snack('Напоминание удалено');
+    setState((){});
   }
 
   @override
   Widget build(BuildContext context) {
-    final df = DateFormat('yyyy-MM-dd HH:mm');
+    final (avgSys, avgDia) = _avg;
+    final tabs = ['Список', 'Графики', 'Напоминания'];
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('BP Logger+'),
         actions: [
-          IconButton(
-            tooltip: 'Экспорт CSV',
-            onPressed: _exportCsvShare,
-            icon: const Icon(Icons.ios_share_rounded),
-          ),
           PopupMenuButton<String>(
-            tooltip: 'Фильтр',
-            onSelected: (v) {
-              if (v == 'custom') {
-                _pickCustomRange();
-              } else {
-                setState(() => _preset = {
-                      'd1': PeriodPreset.d1,
-                      'd7': PeriodPreset.d7,
-                      'd30': PeriodPreset.d30,
-                    }[v]!);
+            icon: const Icon(Icons.filter_alt),
+            onSelected: (v){
+              switch(v){
+                case '24ч': _setPeriod(Period.d24); break;
+                case '7д':  _setPeriod(Period.d7);  break;
+                case '30д': _setPeriod(Period.d30); break;
+                case 'Период…': _setPeriod(Period.custom); break;
               }
             },
-            itemBuilder: (_) => [
-              const PopupMenuItem(value: 'd1', child: Text('24 часа')),
-              const PopupMenuItem(value: 'd7', child: Text('7 дней')),
-              const PopupMenuItem(value: 'd30', child: Text('30 дней')),
-              const PopupMenuItem(value: 'custom', child: Text('Выбрать период…')),
+            itemBuilder: (c)=>[
+              const PopupMenuItem(value:'24ч', child: Text('Последние 24 часа')),
+              const PopupMenuItem(value:'7д',  child: Text('Последние 7 дней')),
+              const PopupMenuItem(value:'30д', child: Text('Последние 30 дней')),
+              const PopupMenuItem(value:'Период…', child: Text('Выбрать период…')),
             ],
-            icon: const Icon(Icons.filter_alt_rounded),
           ),
+          IconButton(icon: const Icon(Icons.ios_share), onPressed: _exportAndShare),
         ],
-        bottom: TabBar(
-          controller: _tabs,
-          tabs: const [Tab(text: 'Список'), Tab(text: 'Графики')],
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(46),
+          child: Row(
+            children: List.generate(tabs.length, (i) {
+              final sel = _tab==i;
+              return Expanded(
+                child: InkWell(
+                  onTap: ()=> setState(()=> _tab=i),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    child: Center(child: Text(tabs[i], style: TextStyle(
+                      fontWeight: sel? FontWeight.w700 : FontWeight.w500,
+                      color: sel? Theme.of(context).colorScheme.primary : null,
+                    ))),
+                  ),
+                ),
+              );
+            }),
+          ),
         ),
       ),
-      body: TabBarView(
-        controller: _tabs,
-        children: [
-          // ======== Список / Ввод ========
-          SingleChildScrollView(
-            padding: const EdgeInsets.all(12),
-            child: Column(
-              children: [
-                _inputCard(df),
-                const SizedBox(height: 12),
-                _periodChips(),
-                const SizedBox(height: 8),
-                if (_filtered.isEmpty)
-                  const Padding(
-                    padding: EdgeInsets.all(24),
-                    child: Text('Нет записей в выбранном периоде'),
-                  ),
-                ..._filtered.map((r) => Card(
-                      child: ListTile(
-                        title: Text('${r.sys}/${r.dia}  ${r.pulse != null ? ' • ${r.pulse} bpm' : ''}'),
-                        subtitle: Text(df.format(r.ts) + (r.note?.isNotEmpty == true ? '\n${r.note}' : '')),
-                        trailing: IconButton(
-                          icon: const Icon(Icons.delete_outline),
-                          onPressed: () => _delete(r),
-                        ),
-                      ),
-                    )),
-                const SizedBox(height: 84),
-              ],
-            ),
-          ),
-          // ======== Графики ========
-          SingleChildScrollView(
-            padding: const EdgeInsets.all(12),
-            child: Column(
-              children: [
-                _chartCard('Систолическое (SYS)', _filtered, (r) => r.sys),
-                const SizedBox(height: 12),
-                _chartCard('Диастолическое (DIA)', _filtered, (r) => r.dia),
-                if (_filtered.any((e) => e.pulse != null)) ...[
-                  const SizedBox(height: 12),
-                  _chartCard('Пульс', _filtered.where((e) => e.pulse != null).toList(), (r) => r.pulse!),
-                ],
-                const SizedBox(height: 96),
-              ],
-            ),
-          ),
-        ],
+      body: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 200),
+        child: switch(_tab){
+          0 => _buildList(avgSys, avgDia),
+          1 => _buildCharts(),
+          2 => _buildReminders(),
+          _ => const SizedBox.shrink(),
+        },
       ),
-      bottomNavigationBar: SafeArea(
+      bottomNavigationBar: _tab==2 ? null : SafeArea(
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-          child: Row(
-            children: [
-              Expanded(
-                child: FilledButton.icon(
-                  onPressed: _add,
-                  icon: const Icon(Icons.check_rounded),
-                  label: const Text('Сохранить'),
-                  style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(48)),
-                ),
-              ),
-              const SizedBox(width: 12),
-              IconButton(
-                tooltip: 'Средние за период',
-                onPressed: _showAverages,
-                icon: const Icon(Icons.functions_rounded),
-              ),
-              const SizedBox(width: 4),
-              PopupMenuButton<String>(
-                tooltip: 'Напоминания',
-                onSelected: (v) {
-                  if (v == 'add') _addReminder();
-                  if (v == 'clear') _clearReminders();
-                },
-                itemBuilder: (_) => [
-                  PopupMenuItem(
-                    value: 'add',
-                    child: Row(children: const [Icon(Icons.alarm_add_outlined), SizedBox(width: 8), Text('Добавить напоминание')]),
-                  ),
-                  PopupMenuItem(
-                    value: 'clear',
-                    child: Row(children: const [Icon(Icons.alarm_off_outlined), SizedBox(width: 8), Text('Удалить все напоминания')]),
-                  ),
-                ],
-                icon: const Icon(Icons.alarm_rounded),
-              ),
-            ],
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+          child: FilledButton.icon(
+            icon: const Icon(Icons.check),
+            label: const Text('Сохранить'),
+            onPressed: _save,
+            style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(52)),
           ),
         ),
       ),
     );
   }
 
-  Widget _inputCard(DateFormat df) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
+  Widget _buildList(double? avgSys, double? avgDia){
+    final list = _filtered..sort((a,b)=>b.ts.compareTo(a.ts));
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        _inputs(),
+        const SizedBox(height: 12),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            TextField(
-              controller: _sys,
-              keyboardType: TextInputType.number,
-              decoration: const InputDecoration(labelText: 'SYS'),
-            ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: _dia,
-              keyboardType: TextInputType.number,
-              decoration: const InputDecoration(labelText: 'DIA'),
-            ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: _pulse,
-              keyboardType: TextInputType.number,
-              decoration: const InputDecoration(labelText: 'Пульс (необязательно)'),
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _note,
-                    decoration: const InputDecoration(labelText: 'Примечание (необязательно)'),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                FilledButton.tonalIcon(
-                  onPressed: () async {
-                    final d = await showDatePicker(
-                      context: context,
-                      initialDate: _picked,
-                      firstDate: DateTime(2020, 1, 1),
-                      lastDate: DateTime.now().add(const Duration(days: 365)),
-                      locale: const Locale('ru', 'RU'),
-                    );
-                    if (d == null) return;
-                    final t = await showTimePicker(
-                      context: context,
-                      initialTime: TimeOfDay.fromDateTime(_picked),
-                    );
-                    if (t == null) return;
-                    setState(() => _picked = DateTime(d.year, d.month, d.day, t.hour, t.minute));
-                  },
-                  icon: const Icon(Icons.event_rounded),
-                  label: Text(DateFormat('yyyy-MM-dd HH:mm').format(_picked)),
-                ),
-              ],
-            ),
+            _avgCard('24 часа', _avgFor(Period.d24)),
+            _avgCard('7 дней',  _avgFor(Period.d7)),
+            _avgCard('30 дней', _avgFor(Period.d30)),
           ],
         ),
-      ),
+        const SizedBox(height: 8),
+        if (avgSys!=null && avgDia!=null)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Text('Среднее за период: ${avgSys.toStringAsFixed(0)}/${avgDia.toStringAsFixed(0)}',
+                style: const TextStyle(fontWeight: FontWeight.w600)),
+          ),
+        ...list.map((e)=>Card(
+          child: ListTile(
+            title: Text('${e.sys}/${e.dia}${e.pulse!=null?'   •   ${e.pulse} bpm':''}'),
+            subtitle: Text('${DateFormat('yyyy-MM-dd HH:mm').format(e.ts)}${e.note!=null?'\n${e.note}':''}'),
+            trailing: IconButton(
+              icon: const Icon(Icons.delete_outline),
+              onPressed: () async {
+                _all.remove(e);
+                await Repo.save(_all);
+                setState((){});
+              },
+            ),
+          ),
+        )),
+        const SizedBox(height: 80),
+      ],
     );
   }
 
-  Widget _periodChips() {
-    return Row(
+  Widget _inputs(){
+    return Column(
       children: [
-        ChoiceChip(
-          selected: _preset == PeriodPreset.d1,
-          label: const Text('24 часа'),
-          onSelected: (_) => setState(() => _preset = PeriodPreset.d1),
+        Row(
+          children: [
+            Expanded(child: _outlined(_sys, 'SYS', keyboard: TextInputType.number)),
+            const SizedBox(width: 12),
+            Expanded(child: _outlined(_dia, 'DIA', keyboard: TextInputType.number)),
+          ],
         ),
-        const SizedBox(width: 8),
-        ChoiceChip(
-          selected: _preset == PeriodPreset.d7,
-          label: const Text('7 дней'),
-          onSelected: (_) => setState(() => _preset = PeriodPreset.d7),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            Expanded(child: _outlined(_note, 'Примечание (необязательно)')),
+            const SizedBox(width: 12),
+            Expanded(child: InkWell(
+              onTap: _pickDateTime,
+              borderRadius: BorderRadius.circular(12),
+              child: InputDecorator(
+                decoration: const InputDecoration(
+                  labelText: 'Дата/время',
+                  border: OutlineInputBorder(),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.event, size: 20),
+                    const SizedBox(width: 8),
+                    Text(DateFormat('yyyy-MM-dd HH:mm').format(_pick)),
+                  ],
+                ),
+              ),
+            )),
+          ],
         ),
-        const SizedBox(width: 8),
-        ChoiceChip(
-          selected: _preset == PeriodPreset.d30,
-          label: const Text('30 дней'),
-          onSelected: (_) => setState(() => _preset = PeriodPreset.d30),
-        ),
-        const SizedBox(width: 8),
-        ActionChip(
-          label: Text('Период: ${_periodLabel()}'),
-          onPressed: _pickCustomRange,
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            Expanded(child: _outlined(_pulse, 'Pulse (необязательно)', keyboard: TextInputType.number)),
+          ],
         ),
       ],
     );
   }
 
-  Widget _chartCard(String title, List<BPRecord> list, int Function(BPRecord) getY) {
-    if (list.isEmpty) {
-      return Card(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Row(children: [Text('$title — нет данных')]),
-        ),
-      );
+  Widget _outlined(TextEditingController c, String label, {TextInputType? keyboard}){
+    return TextField(
+      controller: c,
+      keyboardType: keyboard,
+      decoration: InputDecoration(
+        labelText: label,
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+      ),
+    );
+  }
+
+  (double?, double?) _avgFor(Period p){
+    final now = DateTime.now();
+    DateTime from, to;
+    switch (p) {
+      case Period.d24: from=now.subtract(const Duration(hours:24)); to=now; break;
+      case Period.d7:  from=now.subtract(const Duration(days:7));  to=now; break;
+      case Period.d30: from=now.subtract(const Duration(days:30)); to=now; break;
+      case Period.custom: from=_from??now; to=_to??now; break;
     }
-    final xs = list.map((e) => e.ts.millisecondsSinceEpoch.toDouble()).toList();
-    final ys = list.map(getY).map((e) => e.toDouble()).toList();
+    final list = _all.where((r)=> r.ts.isAfter(from) && r.ts.isBefore(to.add(const Duration(seconds:1)))).toList();
+    if (list.isEmpty) return (null,null);
+    final s = list.fold<int>(0,(a,b)=>a+b.sys)/list.length;
+    final d = list.fold<int>(0,(a,b)=>a+b.dia)/list.length;
+    return (s,d);
+  }
 
-    final minX = xs.reduce((a, b) => a < b ? a : b);
-    final maxX = xs.reduce((a, b) => a > b ? a : b);
-    final minY = ys.reduce((a, b) => a < b ? a : b) - 5;
-    final maxY = ys.reduce((a, b) => a > b ? a : b) + 5;
+  Widget _avgCard(String title, (double?, double?) data){
+    final (s,d) = data;
+    return Expanded(child: Card(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        child: Column(
+          children: [
+            Text(title, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+            const SizedBox(height: 4),
+            Text(s==null? '—' : '${s.toStringAsFixed(0)}/${d!.toStringAsFixed(0)}',
+              style: const TextStyle(fontWeight: FontWeight.w600)),
+          ],
+        ),
+      ),
+    ));
+  }
 
+  Widget _buildCharts(){
+    final list = _filtered..sort((a,b)=>a.ts.compareTo(b.ts));
+    final spotsSys = <FlSpot>[];
+    final spotsDia = <FlSpot>[];
+    for (var i=0;i<list.length;i++){
+      spotsSys.add(FlSpot(i.toDouble(), list[i].sys.toDouble()));
+      spotsDia.add(FlSpot(i.toDouble(), list[i].dia.toDouble()));
+    }
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        _lineCard('Систолическое (SYS)', spotsSys),
+        const SizedBox(height: 12),
+        _lineCard('Диастолическое (DIA)', spotsDia),
+        const SizedBox(height: 80),
+      ],
+    );
+  }
+
+  Widget _lineCard(String title, List<FlSpot> spots){
     return Card(
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 16, 12, 12),
+        padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(title, style: const TextStyle(fontWeight: FontWeight.w600)),
             const SizedBox(height: 8),
             SizedBox(
-              height: 240,
-              child: LineChart(
-                LineChartData(
-                  minX: minX,
-                  maxX: maxX,
-                  minY: minY,
-                  maxY: maxY,
-                  lineBarsData: [
-                    LineChartBarData(
-                      isCurved: false,
-                      spots: [
-                        for (var i = 0; i < list.length; i++)
-                          FlSpot(xs[i], ys[i]),
-                      ],
-                      dotData: const FlDotData(show: false),
-                      belowBarData: BarAreaData(show: false),
-                      color: Theme.of(context).colorScheme.primary,
-                      barWidth: 3,
-                    )
-                  ],
-                  gridData: const FlGridData(show: true),
-                  titlesData: FlTitlesData(
-                    leftTitles: const AxisTitles(sideTitles: SideTitles(showTitles: true, reservedSize: 40)),
-                    rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                    topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                    bottomTitles: AxisTitles(
-                      sideTitles: SideTitles(
-                        showTitles: true,
-                        reservedSize: 28,
-                        getTitlesWidget: (value, meta) {
-                          final d = DateTime.fromMillisecondsSinceEpoch(value.toInt());
-                          return Text(DateFormat('MM-dd').format(d), style: const TextStyle(fontSize: 11));
-                        },
-                      ),
-                    ),
-                  ),
-                  borderData: FlBorderData(show: true),
+              height: 220,
+              child: LineChart(LineChartData(
+                minY: 40, maxY: 260,
+                gridData: const FlGridData(show: true),
+                titlesData: const FlTitlesData(
+                  leftTitles: AxisTitles(sideTitles: SideTitles(showTitles: true, reservedSize: 36)),
+                  bottomTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                  topTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                  rightTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
                 ),
-              ),
-            ),
+                lineBarsData: [
+                  LineChartBarData(
+                    isCurved: true,
+                    barWidth: 3,
+                    dotData: const FlDotData(show: false),
+                    spots: spots,
+                  ),
+                ],
+              )),
+            )
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildReminders(){
+    return FutureBuilder<List<Map<String, dynamic>>>(
+      future: RemindRepo.load(),
+      builder: (c, s){
+        final list = s.data??[];
+        return ListView(
+          padding: const EdgeInsets.all(16),
+          children: [
+            Row(
+              children: [
+                Expanded(child: FilledButton.icon(
+                  onPressed: _addReminderOnce,
+                  icon: const Icon(Icons.alarm_add),
+                  label: const Text('Одноразовое'),
+                )),
+                const SizedBox(width: 12),
+                Expanded(child: OutlinedButton.icon(
+                  onPressed: _addReminderDaily,
+                  icon: const Icon(Icons.repeat),
+                  label: const Text('Ежедневное'),
+                )),
+              ],
+            ),
+            const SizedBox(height: 12),
+            ...list.map((m)=>Card(
+              child: ListTile(
+                title: Text(m['type']=='daily' ? 'Ежедневно: ${m['time']}' :
+                    'Один раз: ${DateFormat('dd.MM.yyyy HH:mm').format(DateTime.parse(m['time']))}'),
+                trailing: IconButton(
+                  icon: const Icon(Icons.delete_outline),
+                  onPressed: ()=> _delReminder(m['id'] as int),
+                ),
+              ),
+            )),
+            const SizedBox(height: 80),
+          ],
+        );
+      },
     );
   }
 }
