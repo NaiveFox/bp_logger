@@ -1,86 +1,58 @@
-name: Build Android APK (bulletproof)
+name: Build Android APK
 
 on:
+  workflow_dispatch:
   push:
     branches: [ main ]
-  workflow_dispatch:
+    paths-ignore:
+      - '**/*.md'
+      - '**/*.txt'
 
 jobs:
-  build:
+  build-android:
     runs-on: ubuntu-latest
+
+    env:
+      JAVA_VERSION: '17'
+      FLUTTER_CHANNEL: 'stable'
+      ANDROID_SDK_ROOT: /opt/android-sdk
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Java 17
+      - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: ${{ env.JAVA_VERSION }}
 
-      - name: Set up Flutter (stable)
+      - name: Set up Flutter (${{ env.FLUTTER_CHANNEL }})
         uses: subosito/flutter-action@v2
         with:
-          channel: stable
+          channel: ${{ env.FLUTTER_CHANNEL }}
           cache: true
 
-      - name: Doctor
+      - name: Flutter doctor (sanity)
         run: |
           flutter --version
           flutter doctor -v
-          dart --version
 
-      - name: Prepare clean Flutter project under proj/
-        shell: bash
-        run: |
-          set -e
-          rm -rf proj
-          flutter create proj
+      - name: Bootstrap project (create android, copy app/, pub get)
+        run: bash tools/bootstrap_project.sh
 
-          # если у тебя есть собственный код, подкладываем его в proj
-          if [ -d app/lib ]; then
-            rm -rf proj/lib
-            cp -r app/lib proj/lib
-          fi
+      - name: Patch Gradle for Java17/AGP8/desugaring
+        run: python3 tools/patch_gradle.py
 
-          if [ -f app/pubspec.yaml ]; then
-            cp app/pubspec.yaml proj/pubspec.yaml
-          fi
-
-          if [ -d app/assets ]; then
-            rm -rf proj/assets
-            cp -r app/assets proj/assets
-          fi
-
-          (cd proj && flutter pub get)
-
-      - name: Ensure gradle.properties flags
-        shell: bash
-        run: |
-          set -e
-          GP=proj/android/gradle.properties
-          touch "$GP"
-          grep -q '^android.useAndroidX=true' "$GP" || echo 'android.useAndroidX=true' >> "$GP"
-          grep -q '^android.enableJetifier=true' "$GP" || echo 'android.enableJetifier=true' >> "$GP"
-          grep -q '^kotlin.jvmTarget=17' "$GP" || echo 'kotlin.jvmTarget=17' >> "$GP"
-
-      - name: Patch gradle for coreLibraryDesugaring (safe)
-        shell: bash
-        run: |
-          set -e
-          python3 tools/patch_gradle.py || python tools/patch_gradle.py
-          echo "Patched gradle."
+      - name: Flutter pub get (final)
+        run: flutter pub get
 
       - name: Build release APK
-        shell: bash
-        run: |
-          set -e
-          (cd proj && flutter build apk --release)
-          ls -lah proj/build/app/outputs/flutter-apk || true
+        run: flutter build apk --release
 
-      - name: Upload artifact
+      - name: Upload APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: apk-release
-          path: proj/build/app/outputs/flutter-apk/*.apk
+          name: bp_logger-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
