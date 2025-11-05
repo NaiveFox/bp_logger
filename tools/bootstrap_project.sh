@@ -1,25 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 1) Если нет android/, создаём проект (оставляем только Android-платформу)
+echo ">> checking Flutter version"
+flutter --version
+
+# 1. Если есть app/, скопировать в корень
+if [ -d "app" ]; then
+  echo ">> copying app/ into repo root"
+  cp -r app/lib . 2>/dev/null || true
+  cp -r app/pubspec.yaml . 2>/dev/null || true
+fi
+
+# 2. Создать android-проект, если отсутствует
 if [ ! -d "android" ]; then
   echo ">> android/ not found: creating Flutter android skeleton"
-  # Имя проекта берём из pubspec.yaml, иначе — bp_logger
   PROJ_NAME=$(awk '/^name:/{print $2; exit}' pubspec.yaml 2>/dev/null || echo "bp_logger")
-  flutter create \
-    --org com.naivefox.bp \
-    --project-name "${PROJ_NAME}" \
-    --platforms android \
-    .
+  flutter create --org com.naivefox.bp --project-name "${PROJ_NAME}" --platforms android .
+else
+  echo ">> android/ already exists, skipping creation"
 fi
 
-# 2) Если твои исходники лежат в app/, подложим их в корень
-if [ -d "app" ]; then
-  echo ">> syncing app/ into repo root"
-  rsync -a --delete app/ .
-fi
-
-# 3) Базовые gradle.properties (безопасные флаги, AndroidX, R8, etc.)
+# 3. Обновить gradle.properties
 GP="android/gradle.properties"
 mkdir -p android
 touch "$GP"
@@ -30,6 +31,8 @@ grep -q "org.gradle.jvmargs" "$GP" || echo "org.gradle.jvmargs=-Xmx2g -Dfile.enc
 grep -q "kotlin.code.style=official" "$GP" || echo "kotlin.code.style=official" >> "$GP"
 grep -q "kotlin.incremental=true" "$GP" || echo "kotlin.incremental=true" >> "$GP"
 
-# 4) Pub get
+# 4. Загрузить зависимости
+echo ">> running flutter pub get"
 flutter pub get
-echo ">> bootstrap done"
+
+echo ">> bootstrap done ✅"
