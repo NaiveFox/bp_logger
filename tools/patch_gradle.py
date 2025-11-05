@@ -43,57 +43,39 @@ def ensure_app_gradle_desugaring():
         return
     s = read(APP_GRADLE)
 
-    # compileOptions c Java 17 + coreLibraryDesugaringEnabled true
-    if "compileOptions" in s:
-        s = re.sub(
-            r"compileOptions\s*\{[^}]*\}",
-            (
-                "compileOptions {\n"
-                "    sourceCompatibility JavaVersion.VERSION_17\n"
-                "    targetCompatibility JavaVersion.VERSION_17\n"
-                "    coreLibraryDesugaringEnabled true\n"
-                "}"
-            ),
-            s, flags=re.DOTALL
-        )
-    else:
-        s = re.sub(
-            r"android\s*\{",
-            (
-                "android {\n"
-                "    compileOptions {\n"
-                "        sourceCompatibility JavaVersion.VERSION_17\n"
-                "        targetCompatibility JavaVersion.VERSION_17\n"
-                "        coreLibraryDesugaringEnabled true\n"
-                "    }\n"
-            ),
-            s, count=1
-        )
+    # --- Java & Kotlin options ---
+    s = re.sub(
+        r"android\s*\{",
+        (
+            "android {\n"
+            "    compileOptions {\n"
+            "        sourceCompatibility JavaVersion.VERSION_17\n"
+            "        targetCompatibility JavaVersion.VERSION_17\n"
+            "        coreLibraryDesugaringEnabled true\n"
+            "    }\n"
+            "    kotlinOptions {\n"
+            "        jvmTarget = '17'\n"
+            "    }\n"
+        ),
+        s,
+        count=1
+    )
 
-    # kotlinOptions.jvmTarget = '17'
-    if "kotlinOptions" in s:
-        s = re.sub(
-            r"kotlinOptions\s*\{[^}]*\}",
-            "kotlinOptions {\n    jvmTarget = '17'\n}",
-            s, flags=re.DOTALL
-        )
-    else:
-        s = re.sub(
-            r"android\s*\{",
-            "android {\n    kotlinOptions {\n        jvmTarget = '17'\n    }\n",
-            s, count=1
-        )
-
-    # dependency: coreLibraryDesugaring
+    # --- Добавим зависимость ---
     if "coreLibraryDesugaring" not in s:
         s = re.sub(
             r"dependencies\s*\{",
             (
                 "dependencies {\n"
-                "    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.0.4'\n"
+                "    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.2'\n"
             ),
-            s, count=1
+            s,
+            count=1
         )
+
+    # --- Гарантируем наличие plugin'а com.android.application ---
+    if "com.android.application" not in s:
+        s = "plugins {\n    id 'com.android.application'\n    id 'org.jetbrains.kotlin.android'\n}\n\n" + s
 
     write(APP_GRADLE, s)
 
