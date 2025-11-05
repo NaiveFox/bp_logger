@@ -3,65 +3,68 @@ import pathlib, re, sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 APP_GRADLE = ROOT / "android" / "app" / "build.gradle"
-TOP_GRADLE = ROOT / "android" / "build.gradle"
 WRAPPER = ROOT / "android" / "gradle" / "wrapper" / "gradle-wrapper.properties"
 
 def read(p: pathlib.Path) -> str:
-    return p.read_text(encoding="utf-8")
+    return p.read_text(encoding="utf-8") if p.exists() else ""
 
 def write(p: pathlib.Path, s: str):
     p.write_text(s, encoding="utf-8")
     print(f"patched: {p.relative_to(ROOT)}")
 
 def ensure_gradle_wrapper():
-    # AGP 8.5.x → Gradle 8.7 — оптимально для Java 17
     if WRAPPER.exists():
         s = read(WRAPPER)
-        s = re.sub(r"distributionUrl=.*",
-                   "distributionUrl=https\\://services.gradle.org/distributions/gradle-8.11.1-bin.zip",
-                   s)
+        s = re.sub(
+            r"distributionUrl=.*",
+            "distributionUrl=https\\://services.gradle.org/distributions/gradle-8.11.1-bin.zip",
+            s
+        )
         write(WRAPPER, s)
 
-def ensure_top_level_agp():
-    if not TOP_GRADLE.exists():
-        return
-    s = read(TOP_GRADLE)
-    # Оба стиля: старый classpath и plugins {} — покроем оба
-
-    # 1) classpath
-    if "com.android.tools.build:gradle" in s:
-        s = re.sub(r"(com\.android\.tools\.build:gradle:)\d+(\.\d+)*",
-                   r"\g<1>8.5.2", s)
-
-    # 2) plugins DSL (назв. не указывается с версией здесь — версия берётся из settings/pluginManagement,
-    # но во Flutter-шаблоне обычно top-level build.gradle с classpath; оставим как есть)
-    write(TOP_GRADLE, s)
-
-def ensure_app_gradle_desugaring():
+def patch_app_gradle():
     if not APP_GRADLE.exists():
-        print("WARN: android/app/build.gradle not found")
+        print("⚠ android/app/build.gradle not found")
         return
     s = read(APP_GRADLE)
 
-    # --- Java & Kotlin options ---
-    s = re.sub(
-        r"android\s*\{",
-        (
-            "android {\n"
-            "    compileOptions {\n"
-            "        sourceCompatibility JavaVersion.VERSION_17\n"
-            "        targetCompatibility JavaVersion.VERSION_17\n"
-            "        coreLibraryDesugaringEnabled true\n"
-            "    }\n"
-            "    kotlinOptions {\n"
-            "        jvmTarget = '17'\n"
-            "    }\n"
-        ),
-        s,
-        count=1
-    )
+    # 1. Убедимся, что есть compileOptions с Java 17 и десугарингом
+    if "coreLibraryDesugaringEnabled" not in s:
+        s = re.sub(
+            r"(compileOptions\s*\{[^\}]*targetCompatibility[^\}]*\})",
+            lambda m: m.group(1) + "\n    coreLibraryDesugaringEnabled true",
+            s,
+            count=1
+        )
+    if "compileOptions" not in s:
+        s = re.sub(
+            r"android\s*\{",
+            (
+                "android {\n"
+                "    compileOptions {\n"
+                "        sourceCompatibility JavaVersion.VERSION_17\n"
+                "        targetCompatibility JavaVersion.VERSION_17\n"
+                "        coreLibraryDesugaringEnabled true\n"
+                "    }\n"
+            ),
+            s, count=1
+        )
 
-    # --- Добавим зависимость ---
+    # 2. kotlinOptions jvmTarget = '17'
+    if "kotlinOptions" not in s:
+        s = re.sub(
+            r"android\s*\{",
+            "android {\n    kotlinOptions {\n        jvmTarget = '17'\n    }\n",
+            s, count=1
+        )
+    else:
+        s = re.sub(
+            r"kotlinOptions\s*\{[^\}]*\}",
+            "kotlinOptions {\n    jvmTarget = '17'\n}",
+            s, flags=re.DOTALL
+        )
+
+    # 3. Добавим зависимость coreLibraryDesugaring
     if "coreLibraryDesugaring" not in s:
         s = re.sub(
             r"dependencies\s*\{",
@@ -69,21 +72,19 @@ def ensure_app_gradle_desugaring():
                 "dependencies {\n"
                 "    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.2'\n"
             ),
-            s,
-            count=1
+            s, count=1
         )
 
-    # --- Гарантируем наличие plugin'а com.android.application ---
-    if "com.android.application" not in s:
-        s = "plugins {\n    id 'com.android.application'\n    id 'org.jetbrains.kotlin.android'\n}\n\n" + s
+    # 4. Вставим import для JavaVersion в начало файла, если его нет
+    if "JavaVersion" not in s.splitlines()[0]:
+        s = "import org.gradle.api.JavaVersion\n" + s
 
     write(APP_GRADLE, s)
+    print("✅ build.gradle patched with coreLibraryDesugaringEnabled true")
 
 def main():
     ensure_gradle_wrapper()
-    ensure_top_level_agp()
-    ensure_app_gradle_desugaring()
-    print(">> Gradle patched for Java17/AGP8/desugaring")
+    patch_app_gradle()
 
 if __name__ == "__main__":
     sys.exit(main())
