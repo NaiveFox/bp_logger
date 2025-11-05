@@ -1,79 +1,107 @@
 #!/usr/bin/env python3
-import re
-from pathlib import Path
+import pathlib, re, sys
 
-def patch_text_kts(txt: str) -> str:
-    # Добавить compileOptions + kotlinOptions + флаг десугаринга, если нет
-    if 'isCoreLibraryDesugaringEnabled' not in txt:
-        txt = re.sub(
-            r'android\s*\{',
-            'android {\n'
-            '    compileOptions {\n'
-            '        sourceCompatibility = JavaVersion.VERSION_17\n'
-            '        targetCompatibility = JavaVersion.VERSION_17\n'
-            '        isCoreLibraryDesugaringEnabled = true\n'
-            '    }\n'
-            '    kotlinOptions {\n'
-            '        jvmTarget = "17"\n'
-            '    }\n',
-            txt, count=1
-        )
-    # Добавить зависимость десугаринга, если нет
-    if 'coreLibraryDesugaring' not in txt:
-        txt = re.sub(
-            r'dependencies\s*\{',
-            'dependencies {\n'
-            '    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")',
-            txt, count=1
-        )
-    return txt
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+APP_GRADLE = ROOT / "android" / "app" / "build.gradle"
+TOP_GRADLE = ROOT / "android" / "build.gradle"
+WRAPPER = ROOT / "android" / "gradle" / "wrapper" / "gradle-wrapper.properties"
 
-def patch_text_groovy(txt: str) -> str:
-    if 'isCoreLibraryDesugaringEnabled' not in txt:
-        txt = re.sub(
-            r'android\s*\{',
-            'android {\n'
-            '    compileOptions {\n'
-            '        sourceCompatibility JavaVersion.VERSION_17\n'
-            '        targetCompatibility JavaVersion.VERSION_17\n'
-            '        coreLibraryDesugaringEnabled true\n'
-            '    }\n'
-            '    kotlinOptions {\n'
-            '        jvmTarget = "17"\n'
-            '    }\n',
-            txt, count=1
-        )
-    if 'coreLibraryDesugaring' not in txt:
-        txt = re.sub(
-            r'dependencies\s*\{',
-            'dependencies {\n'
-            '    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.0.4"',
-            txt, count=1
-        )
-    return txt
+def read(p: pathlib.Path) -> str:
+    return p.read_text(encoding="utf-8")
 
-def patch_file(path: Path):
-    if not path.exists():
-        return False
-    txt = path.read_text(encoding='utf-8', errors='ignore')
-    original = txt
-    if path.suffix == '.kts':
-        txt = patch_text_kts(txt)
+def write(p: pathlib.Path, s: str):
+    p.write_text(s, encoding="utf-8")
+    print(f"patched: {p.relative_to(ROOT)}")
+
+def ensure_gradle_wrapper():
+    # AGP 8.5.x → Gradle 8.7 — оптимально для Java 17
+    if WRAPPER.exists():
+        s = read(WRAPPER)
+        s = re.sub(r"distributionUrl=.*",
+                   "distributionUrl=https\\://services.gradle.org/distributions/gradle-8.7-bin.zip",
+                   s)
+        write(WRAPPER, s)
+
+def ensure_top_level_agp():
+    if not TOP_GRADLE.exists():
+        return
+    s = read(TOP_GRADLE)
+    # Оба стиля: старый classpath и plugins {} — покроем оба
+
+    # 1) classpath
+    if "com.android.tools.build:gradle" in s:
+        s = re.sub(r"(com\.android\.tools\.build:gradle:)\d+(\.\d+)*",
+                   r"\g<1>8.5.2", s)
+
+    # 2) plugins DSL (назв. не указывается с версией здесь — версия берётся из settings/pluginManagement,
+    # но во Flutter-шаблоне обычно top-level build.gradle с classpath; оставим как есть)
+    write(TOP_GRADLE, s)
+
+def ensure_app_gradle_desugaring():
+    if not APP_GRADLE.exists():
+        print("WARN: android/app/build.gradle not found")
+        return
+    s = read(APP_GRADLE)
+
+    # compileOptions c Java 17 + coreLibraryDesugaringEnabled true
+    if "compileOptions" in s:
+        s = re.sub(
+            r"compileOptions\s*\{[^}]*\}",
+            (
+                "compileOptions {\n"
+                "    sourceCompatibility JavaVersion.VERSION_17\n"
+                "    targetCompatibility JavaVersion.VERSION_17\n"
+                "    coreLibraryDesugaringEnabled true\n"
+                "}"
+            ),
+            s, flags=re.DOTALL
+        )
     else:
-        txt = patch_text_groovy(txt)
-    if txt != original:
-        path.write_text(txt, encoding='utf-8')
-        return True
-    return False
+        s = re.sub(
+            r"android\s*\{",
+            (
+                "android {\n"
+                "    compileOptions {\n"
+                "        sourceCompatibility JavaVersion.VERSION_17\n"
+                "        targetCompatibility JavaVersion.VERSION_17\n"
+                "        coreLibraryDesugaringEnabled true\n"
+                "    }\n"
+            ),
+            s, count=1
+        )
+
+    # kotlinOptions.jvmTarget = '17'
+    if "kotlinOptions" in s:
+        s = re.sub(
+            r"kotlinOptions\s*\{[^}]*\}",
+            "kotlinOptions {\n    jvmTarget = '17'\n}",
+            s, flags=re.DOTALL
+        )
+    else:
+        s = re.sub(
+            r"android\s*\{",
+            "android {\n    kotlinOptions {\n        jvmTarget = '17'\n    }\n",
+            s, count=1
+        )
+
+    # dependency: coreLibraryDesugaring
+    if "coreLibraryDesugaring" not in s:
+        s = re.sub(
+            r"dependencies\s*\{",
+            (
+                "dependencies {\n"
+                "    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.0.4'\n"
+            ),
+            s, count=1
+        )
+
+    write(APP_GRADLE, s)
 
 def main():
-    # Ищем gradle у Flutter-проекта, который собираем в папке proj/
-    for p in [
-        Path('proj/android/app/build.gradle.kts'),
-        Path('proj/android/app/build.gradle'),
-    ]:
-        patched = patch_file(p)
-        print(f"[patch_gradle] {p}: {'patched' if patched else 'ok'}")
+    ensure_gradle_wrapper()
+    ensure_top_level_agp()
+    ensure_app_gradle_desugaring()
+    print(">> Gradle patched for Java17/AGP8/desugaring")
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
