@@ -18,7 +18,7 @@ def ensure_gradle_wrapper():
     if WRAPPER.exists():
         s = read(WRAPPER)
         s = re.sub(r"distributionUrl=.*",
-                   "distributionUrl=https\\://services.gradle.org/distributions/gradle-8.7-bin.zip",
+                   "distributionUrl=https\\://services.gradle.org/distributions/gradle-8.11.1-bin.zip",
                    s)
         write(WRAPPER, s)
 
