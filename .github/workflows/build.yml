@@ -48,7 +48,8 @@ jobs:
         run: flutter pub get
 
       - name: Build release APK
-        run: flutter build apk --release
+        run: flutter build apk --release --target=app/lib/main.dart
+    
 
       - name: Upload APK
         if: success()
