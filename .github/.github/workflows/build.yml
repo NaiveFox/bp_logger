@@ -1,0 +1,120 @@
+name: build-android
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java (17)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Flutter (stable)
+        uses: subosito/flutter-action@v2
+        with:
+          channel: "stable"
+          cache: true
+
+      - name: Flutter doctor
+        run: flutter doctor -v
+
+      # === ВСЁ ДАЛЬШЕ ДЕЛАЕТСЯ АВТОМАТОМ ===
+      - name: Prepare android host (clean & create)
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          # 0) Удалим корневой android, если раньше оставался
+          rm -rf android
+
+          # 1) Создаём НОВЫЙ android-хост (современный v2 embedding)
+          flutter create --platforms=android --org com.naivefox --project-name bp_logger .
+
+          # 2) Перекладываем твой код из app/lib в lib (точка входа останется lib/main.dart)
+          if [ -d app/lib ]; then
+            rm -rf lib
+            mkdir -p lib
+            cp -R app/lib/* lib/
+          fi
+          # Если pubspec.yaml лежит в app/, используем его
+          if [ -f app/pubspec.yaml ]; then
+            cp app/pubspec.yaml ./pubspec.yaml
+          fi
+
+          # 3) Приводим идентификаторы к единому виду
+          APP_KTS="android/app/build.gradle.kts"
+          APP_GRADLE="android/app/build.gradle"
+          if [ -f "$APP_KTS" ]; then
+            sed -i 's/^namespace = .*/namespace = "com.naivefox.bp_logger"/' "$APP_KTS" || true
+            sed -i 's/applicationId = ".*"/applicationId = "com.naivefox.bp_logger"/' "$APP_KTS" || true
+          fi
+          if [ -f "$APP_GRADLE" ]; then
+            sed -i 's/^namespace .*=.*/namespace "com.naivefox.bp_logger"/' "$APP_GRADLE" || true
+            sed -i 's/applicationId ".*"/applicationId "com.naivefox.bp_logger"/' "$APP_GRADLE" || true
+          fi
+
+          # 4) gradle.properties (AndroidX/Jetifier, кодировка)
+          cat > android/gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.enableJetifier=true
+          EOF
+
+          # 5) Чиним AndroidManifest под v2-эмбеддинг (+ уведомления)
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          sed -i '/android:name="\${applicationName}"/d' "$MANIFEST" || true
+          sed -i 's/android:name="\.MainActivity"/android:name="com.naivefox.bp_logger.MainActivity"/' "$MANIFEST" || true
+          # Вставим meta-data после <application ...>
+          awk '
+            BEGIN{ins=0}
+            /<application[^>]*>/ && ins==0 {
+              print
+              print "    <meta-data android:name=\"flutterEmbedding\" android:value=\"2\" />"
+              print "    <uses-library android:name=\"org.apache.http.legacy\" android:required=\"false\" />"
+              ins=1
+              next
+            }
+            {print}
+          ' "$MANIFEST" > "$MANIFEST.tmp" && mv "$MANIFEST.tmp" "$MANIFEST"
+
+          # 6) Java 17 + desugaring (AGP 8.x дружит с Gradle 8.11+)
+          WRAP="android/gradle/wrapper/gradle-wrapper.properties"
+          if [ -f "$WRAP" ]; then
+            sed -i 's#distributionUrl=.*#distributionUrl=https\\://services.gradle.org/distributions/gradle-8.11.1-bin.zip#' "$WRAP"
+          fi
+
+          # Внедрим coreLibraryDesugaring и jvmTarget=17
+          if [ -f "$APP_KTS" ]; then
+            sed -i '0,/android \{/s//android {\n    compileOptions {\n        sourceCompatibility = JavaVersion.VERSION_17\n        targetCompatibility = JavaVersion.VERSION_17\n        isCoreLibraryDesugaringEnabled = true\n    }\n    kotlinOptions { jvmTarget = "17" }\n/' "$APP_KTS" || true
+            grep -q 'coreLibraryDesugaring(' "$APP_KTS" || \
+              sed -i '0,/dependencies \{/s//dependencies {\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.2")\n/' "$APP_KTS"
+            grep -q '^import org.gradle.api.JavaVersion' "$APP_KTS" || \
+              sed -i '1i import org.gradle.api.JavaVersion' "$APP_KTS"
+          fi
+          if [ -f "$APP_GRADLE" ]; then
+            sed -i '0,/android \{/s//android {\n    compileOptions {\n        sourceCompatibility JavaVersion.VERSION_17\n        targetCompatibility JavaVersion.VERSION_17\n        coreLibraryDesugaringEnabled true\n    }\n    kotlinOptions { jvmTarget = "17" }\n/' "$APP_GRADLE" || true
+            grep -q "coreLibraryDesugaring" "$APP_GRADLE" || \
+              sed -i '0,/dependencies \{/s//dependencies {\n    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.1.2"\n/' "$APP_GRADLE"
+            grep -q '^import org.gradle.api.JavaVersion' "$APP_GRADLE" || \
+              sed -i '1i import org.gradle.api.JavaVersion' "$APP_GRADLE"
+          fi
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Build APK (release)
+        run: flutter build apk --release --target=lib/main.dart
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: bp_logger-release-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
