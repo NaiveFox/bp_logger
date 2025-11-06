@@ -1,74 +1,254 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import sys, re, pathlib
+"""
+Стабилизация сборки Flutter Android под стек:
+- AGP 8.3.2
+- Gradle 8.6 (wrapper)
+- Kotlin 1.9.24
+- Java 17 (jvmTarget 17)
+- compileSdk/targetSdk 34, minSdk 21
+- coreLibraryDesugaringEnabled true + desugar_jdk_libs 2.0.4
 
-ROOT = pathlib.Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else None
-if not ROOT or not ROOT.exists():
-    print("Usage: python3 tools/patch_gradle.py app/android")
-    sys.exit(1)
+Использование:
+    python3 tools/patch_gradle.py app
+или
+    python3 tools/patch_gradle.py app/android   # тоже сработает — путь нормализуется
+"""
 
-WRAPPER = ROOT / "gradle" / "wrapper" / "gradle-wrapper.properties"
-APP_G = ROOT / "app" / "build.gradle"
-APP_K = ROOT / "app" / "build.gradle.kts"
+import sys
+import pathlib
+import re
 
-DESUGAR = "2.1.2"
-GRADLE = "https\\://services.gradle.org/distributions/gradle-8.11.1-bin.zip"
+AGP_VERSION = "8.3.2"
+GRADLE_WRAPPER = "8.6"
+KOTLIN_VERSION = "1.9.24"
+COMPILE_SDK = "34"
+TARGET_SDK = "34"
+MIN_SDK = "21"
+DESUGAR_VER = "2.0.4"
 
-def rd(p): return p.read_text(encoding="utf-8") if p.exists() else ""
-def wr(p,s): p.parent.mkdir(parents=True, exist_ok=True); p.write_text(s, encoding="utf-8")
+def read_text(p: pathlib.Path) -> str:
+    return p.read_text(encoding="utf-8", errors="ignore")
 
-# gradle-wrapper → 8.11.1
-w = rd(WRAPPER)
-if w:
-    w2 = re.sub(r"distributionUrl=.*", f"distributionUrl={GRADLE}", w)
-    if w2 != w:
-        wr(WRAPPER, w2)
+def write_text(p: pathlib.Path, s: str):
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(s, encoding="utf-8")
 
-def patch_groovy(s: str) -> str:
-    if "import org.gradle.api.JavaVersion" not in s:
-        s = "import org.gradle.api.JavaVersion\n" + s
-    # namespace / compileSdk sane defaults if missing (idempotent)
-    if "namespace" not in s:
-        s = s.replace("android {", "android {\n    namespace \"com.naivefox.bp_logger\"\n", 1)
-    s = s.replace("VERSION_1_8", "VERSION_17")
-    if "compileOptions" not in s:
-        s = re.sub(r"android\s*{", "android {\n    compileOptions {\n        sourceCompatibility JavaVersion.VERSION_17\n        targetCompatibility JavaVersion.VERSION_17\n        coreLibraryDesugaringEnabled true\n    }\n", s, count=1)
+def normalize_app_dir(arg: str) -> pathlib.Path:
+    base = pathlib.Path(arg).resolve()
+    # Если нам передали .../app/android, поднимемся на уровень до app
+    if base.name == "android":
+        if base.parent.name.lower() == "app":
+            return base.parent
+        # fallback: если структура иная — всё равно работаем относительно родителя
+        return base.parent
+    return base
+
+def ensure_gradle_wrapper(app_dir: pathlib.Path):
+    wrapper = app_dir / "android" / "gradle" / "wrapper" / "gradle-wrapper.properties"
+    if wrapper.exists():
+        txt = read_text(wrapper)
+        txt = re.sub(
+            r"distributionUrl=.*",
+            f"distributionUrl=https\\://services.gradle.org/distributions/gradle-{GRADLE_WRAPPER}-bin.zip",
+            txt,
+        )
     else:
-        s = re.sub(r"compileOptions\s*{[^}]*}", lambda m: re.sub(r"}\s*$", "    sourceCompatibility JavaVersion.VERSION_17\n    targetCompatibility JavaVersion.VERSION_17\n    coreLibraryDesugaringEnabled true\n}", m.group(0)), s, count=1, flags=re.DOTALL)
-    if "kotlinOptions" not in s:
-        s = s.replace("android {", "android {\n    kotlinOptions { jvmTarget = '17' }\n", 1)
-    else:
-        s = re.sub(r"kotlinOptions\s*{[^}]*}", lambda m: re.sub(r"jvmTarget\s*=\s*['\"]?1\.8['\"]?", "jvmTarget = '17'", m.group(0)), s, count=1)
-    if "coreLibraryDesugaring" not in s:
-        s = re.sub(r"dependencies\s*{", "dependencies {\n    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:%s'" % DESUGAR, s, count=1)
-    return s
+        txt = (
+            "distributionBase=GRADLE_USER_HOME\n"
+            "distributionPath=wrapper/dists\n"
+            f"distributionUrl=https\\://services.gradle.org/distributions/gradle-{GRADLE_WRAPPER}-bin.zip\n"
+            "zipStoreBase=GRADLE_USER_HOME\n"
+            "zipStorePath=wrapper/dists\n"
+        )
+    write_text(wrapper, txt)
 
-def patch_kts(s: str) -> str:
-    if "import org.gradle.api.JavaVersion" not in s:
-        s = "import org.gradle.api.JavaVersion\n" + s
-    if "namespace" not in s:
-        s = s.replace("android {", "android {\n    namespace = \"com.naivefox.bp_logger\"\n", 1)
-    s = s.replace("VERSION_1_8", "VERSION_17")
-    if "compileOptions" not in s:
-        s = re.sub(r"android\s*{", "android {\n    compileOptions {\n        sourceCompatibility = JavaVersion.VERSION_17\n        targetCompatibility = JavaVersion.VERSION_17\n        isCoreLibraryDesugaringEnabled = true\n    }\n", s, count=1)
-    else:
-        s = re.sub(r"compileOptions\s*{[^}]*}", lambda m: re.sub(r"}\s*$", "    isCoreLibraryDesugaringEnabled = true\n}", m.group(0)), s, count=1, flags=re.DOTALL)
-    if "kotlinOptions" not in s:
-        s = s.replace("android {", "android {\n    kotlinOptions { jvmTarget = \"17\" }\n", 1)
-    else:
-        s = re.sub(r"kotlinOptions\s*{[^}]*}", lambda m: re.sub(r"jvmTarget\s*=\s*['\"]?1\.8['\"]?", "jvmTarget = \"17\"", m.group(0)), s, count=1)
-    if "coreLibraryDesugaring(" not in s:
-        s = re.sub(r"dependencies\s*{", "dependencies {\n    coreLibraryDesugaring(\"com.android.tools:desugar_jdk_libs:%s\")" % DESUGAR, s, count=1)
-    return s
+def ensure_gradle_properties(app_dir: pathlib.Path):
+    gp = app_dir / "android" / "gradle.properties"
+    txt = read_text(gp) if gp.exists() else ""
+    flags = {
+        "org.gradle.jvmargs": "-Xmx3g -Dfile.encoding=UTF-8",
+        "android.useAndroidX": "true",
+        "android.enableJetifier": "true",
+        "org.gradle.java.installations.auto-detect": "true",
+    }
+    for k, v in flags.items():
+        if re.search(rf"^{re.escape(k)}=", txt, flags=re.M):
+            txt = re.sub(rf"^{re.escape(k)}=.*$", f"{k}={v}", txt, flags=re.M)
+        else:
+            if txt and not txt.endswith("\n"):
+                txt += "\n"
+            txt += f"{k}={v}\n"
+    write_text(gp, txt)
 
-g = rd(APP_G)
-k = rd(APP_K)
-if g:
-    s2 = patch_groovy(g)
-    if s2 != g: wr(APP_G, s2)
-if k:
-    s2 = patch_kts(k)
-    if s2 != k: wr(APP_K, s2)
+def patch_root_build_gradle(app_dir: pathlib.Path):
+    root = app_dir / "android" / "build.gradle"
+    if not root.exists():
+        tpl = f"""// Generated by patch_gradle.py
+plugins {{
+    id "com.android.application" version "{AGP_VERSION}" apply false
+    id "org.jetbrains.kotlin.android" version "{KOTLIN_VERSION}" apply false
+}}
 
-print("[ok] Gradle patched (Java17 + desugaring + namespace)")
+tasks.register("clean", Delete) {{
+    delete(rootProject.buildDir)
+}}
+"""
+        write_text(root, tpl)
+        return
+
+    txt = read_text(root)
+    def bump_plugin(block: str) -> str:
+        block = re.sub(
+            r'id\s+"com\.android\.application"\s+version\s+"[^"]+"\s+apply\s+false',
+            f'id "com.android.application" version "{AGP_VERSION}" apply false',
+            block,
+        )
+        block = re.sub(
+            r'id\s+"org\.jetbrains\.kotlin\.android"\s+version\s+"[^"]+"\s+apply\s+false',
+            f'id "org.jetbrains.kotlin.android" version "{KOTLIN_VERSION}" apply false',
+            block,
+        )
+        return block
+    txt = re.sub(r"plugins\s*\{[\s\S]*?\}", lambda m: bump_plugin(m.group(0)), txt, count=1)
+    write_text(root, txt)
+
+def patch_app_build_gradle(app_dir: pathlib.Path):
+    app = app_dir / "android" / "app" / "build.gradle"
+    if not app.exists():
+        tpl = f"""// Generated by patch_gradle.py
+plugins {{
+    id "com.android.application"
+    id "org.jetbrains.kotlin.android"
+}}
+
+android {{
+    namespace "com.example.bp_logger"
+    compileSdk {COMPILE_SDK}
+
+    defaultConfig {{
+        applicationId "com.example.bp_logger"
+        minSdk {MIN_SDK}
+        targetSdk {TARGET_SDK}
+        versionCode 1
+        versionName "1.0"
+    }}
+
+    buildTypes {{
+        release {{
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }}
+    }}
+
+    compileOptions {{
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+        coreLibraryDesugaringEnabled true
+    }}
+    kotlinOptions {{
+        jvmTarget = "17"
+    }}
+}}
+
+dependencies {{
+    implementation "org.jetbrains.kotlin:kotlin-stdlib:{KOTLIN_VERSION}"
+    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:{DESUGAR_VER}"
+}}
+"""
+        write_text(app, tpl)
+        return
+
+    txt = read_text(app)
+
+    # namespace
+    if "namespace" not in txt:
+        txt = re.sub(r"android\s*\{", 'android {\n    namespace "com.example.bp_logger"', txt, count=1)
+
+    # compileSdk
+    if re.search(r"compileSdk\s+\d+", txt):
+        txt = re.sub(r"compileSdk\s+\d+", f"compileSdk {COMPILE_SDK}", txt)
+    else:
+        txt = re.sub(r"android\s*\{", f"android {{\n    compileSdk {COMPILE_SDK}", txt, count=1)
+
+    # defaultConfig min/target
+    if re.search(r"minSdk\s+\d+", txt):
+        txt = re.sub(r"minSdk\s+\d+", f"minSdk {MIN_SDK}", txt)
+    else:
+        txt = re.sub(r"defaultConfig\s*\{", f"defaultConfig {{\n        minSdk {MIN_SDK}", txt, count=1)
+
+    if re.search(r"targetSdk\s+\d+", txt):
+        txt = re.sub(r"targetSdk\s+\d+", f"targetSdk {TARGET_SDK}", txt)
+    else:
+        txt = re.sub(r"defaultConfig\s*\{", f"defaultConfig {{\n        targetSdk {TARGET_SDK}", txt, count=1)
+
+    # compileOptions
+    if "compileOptions" in txt:
+        txt = re.sub(
+            r"compileOptions\s*\{[\s\S]*?\}",
+            """compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+        coreLibraryDesugaringEnabled true
+    }""",
+            txt,
+            count=1,
+        )
+    else:
+        txt = re.sub(
+            r"android\s*\{",
+            """android {
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+        coreLibraryDesugaringEnabled true
+    }""",
+            txt,
+            count=1,
+        )
+
+    # kotlinOptions jvmTarget=17
+    if "kotlinOptions" in txt:
+        txt = re.sub(r'kotlinOptions\s*\{[\s\S]*?\}', 'kotlinOptions {\n        jvmTarget = "17"\n    }', txt, count=1)
+    else:
+        txt = re.sub(r"android\s*\{", r"""android {
+    kotlinOptions {
+        jvmTarget = "17"
+    }""", txt, count=1)
+
+    # dependency на desugaring
+    if "coreLibraryDesugaring" not in txt:
+        if "dependencies" in txt:
+            txt = re.sub(
+                r"dependencies\s*\{",
+                f"""dependencies {{
+    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:{DESUGAR_VER}" """,
+                txt,
+                count=1,
+            )
+        else:
+            txt += f"""
+
+dependencies {{
+    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:{DESUGAR_VER}"
+}}
+"""
+
+    write_text(app, txt)
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: python3 tools/patch_gradle.py app_or_app_android", file=sys.stderr)
+        sys.exit(1)
+    app_dir = normalize_app_dir(sys.argv[1])
+
+    ensure_gradle_wrapper(app_dir)
+    ensure_gradle_properties(app_dir)
+    patch_root_build_gradle(app_dir)
+    patch_app_build_gradle(app_dir)
+
+    print("✅ Patched: AGP 8.3.2, Gradle 8.6, Kotlin 1.9.24, Java 17, desugaring wired.")
+
+if __name__ == "__main__":
+    main()
