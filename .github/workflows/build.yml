@@ -12,14 +12,13 @@ on:
 jobs:
   build-android:
     runs-on: ubuntu-latest
-
     env:
       WORKDIR: app
       JAVA_VERSION: "17"
       FLUTTER_CHANNEL: "stable"
 
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Set up Java ${{ env.JAVA_VERSION }}
@@ -33,7 +32,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Flutter (${{ env.FLUTTER_CHANNEL }})
+      - name: Install Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: ${{ env.FLUTTER_CHANNEL }}
@@ -42,45 +41,64 @@ jobs:
       - name: Flutter doctor
         run: flutter doctor -v
 
-      - name: Ensure fresh Android wrapper
+      - name: Recreate fresh Android wrapper
         working-directory: ${{ env.WORKDIR }}
         run: |
           rm -rf android
           flutter create --platforms=android .
 
-      - name: Pub get
+      - name: Get dependencies
         working-directory: ${{ env.WORKDIR }}
         run: flutter pub get
 
-      - name: Patch Android (Gradle+Manifest)
-        run: |
-          python3 tools/patch_android.py "$WORKDIR"
+      - name: Apply Android patches
+        run: python3 tools/patch_android.py ${{ github.workspace }}/${{ env.WORKDIR }}
 
-      - name: Build release APK
+      - name: Build APK (universal + split per ABI)
         working-directory: ${{ env.WORKDIR }}
         env:
-          GRADLE_OPTS: "-Dorg.gradle.warning.mode=all"
+          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.warning.mode=all"
         run: |
           flutter clean
-          flutter build apk --release -v --no-shrink --dart-define=CI=true
+          flutter build apk --release --split-per-abi -v --no-shrink --dart-define=CI=true
 
-      - name: Upload APK artifact
-        if: success()
+      - name: Upload universal APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-release.apk
-          path: app/build/app/outputs/flutter-apk/app-release.apk
+          name: bp_logger-universal.apk
+          path: ${{ env.WORKDIR }}/build/app/outputs/apk/release/app-release.apk
           if-no-files-found: error
+
+      - name: Upload arm64-v8a APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: bp_logger-arm64-v8a.apk
+          path: ${{ env.WORKDIR }}/build/app/outputs/apk/release/app-arm64-v8a-release.apk
+          if-no-files-found: error
+
+      - name: Upload armeabi-v7a APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: bp_logger-armeabi-v7a.apk
+          path: ${{ env.WORKDIR }}/build/app/outputs/apk/release/app-armeabi-v7a-release.apk
+          if-no-files-found: ignore
+
+      - name: Upload x86_64 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: bp_logger-x86_64.apk
+          path: ${{ env.WORKDIR }}/build/app/outputs/apk/release/app-x86_64-release.apk
+          if-no-files-found: ignore
 
       - name: Collect Gradle diagnostics
         if: always()
         working-directory: ${{ env.WORKDIR }}
         run: |
           mkdir -p diag
-          find . -path "*/build/reports/problems/problems-report.html" -print -exec cp --parents {} diag/ \; || true
-          find android/app/build -name "*AndroidManifest*.xml" -print -exec cp --parents {} diag/ \; || true
-          find android/app/build -name "*.log" -print -exec cp --parents {} diag/ \; || true
-          cp -a android/settings.gradle* android/build.gradle* android/app/build.gradle* diag/ 2>/dev/null || true
+          find . -path "*/build/reports/problems/problems-report.html" -exec cp --parents {} diag/ \; 2>/dev/null || true
+          find android -name "*AndroidManifest*.xml" -exec cp --parents {} diag/ \; 2>/dev/null || true
+          find android -name "*.log" -exec cp --parents {} diag/ \; 2>/dev/null || true
+          cp -r android/*.gradle* diag/ 2>/dev/null || true
           (cd diag && zip -r ../gradle-diagnostics.zip .) || true
 
       - name: Upload diagnostics
@@ -88,5 +106,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: gradle-diagnostics
-          path: app/gradle-diagnostics.zip
+          path: ${{ env.WORKDIR }}/gradle-diagnostics.zip
           if-no-files-found: ignore
