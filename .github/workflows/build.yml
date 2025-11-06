@@ -53,18 +53,28 @@ jobs:
         working-directory: ${{ env.WORKDIR }}
         run: flutter pub get
 
-      # ВАЖНО: передаём В КОРЕНЬ ПРОЕКТА (app), а не app/android
-      - name: Patch Gradle/Kotlin/Desugaring
+      - name: Patch Gradle/Kotlin/Desugaring (Groovy or KTS)
         run: |
           python3 tools/patch_gradle.py "$WORKDIR"
 
-      - name: Verify desugaring wired
+      - name: Verify desugaring wired (Groovy/KTS)
         working-directory: ${{ env.WORKDIR }}
+        shell: bash
         run: |
-          echo "== android/app/build.gradle =="
-          cat android/app/build.gradle
-          echo "== Check for coreLibraryDesugaring entry =="
-          grep -q 'coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:' android/app/build.gradle || { echo "::error ::coreLibraryDesugaring dependency not found"; exit 1; }
+          set -e
+          FILE_GROOVY="android/app/build.gradle"
+          FILE_KTS="android/app/build.gradle.kts"
+          if [ -f "$FILE_GROOVY" ]; then
+            echo "== $FILE_GROOVY =="
+            cat "$FILE_GROOVY"
+            grep -q 'coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:' "$FILE_GROOVY"
+          elif [ -f "$FILE_KTS" ]; then
+            echo "== $FILE_KTS =="
+            cat "$FILE_KTS"
+            grep -q 'coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:' "$FILE_KTS"
+          else
+            echo "::error ::Neither build.gradle nor build.gradle.kts found"; exit 1
+          fi
 
       - name: Build release APK
         working-directory: ${{ env.WORKDIR }}
