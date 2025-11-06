@@ -1,85 +1,80 @@
-name: build-android
+name: Build Flutter APK (Android)
 
 on:
   workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - "app/**"
+      - ".github/workflows/build.yml"
+      - "tools/**"
 
 jobs:
-  android:
+  build-android:
     runs-on: ubuntu-latest
+
+    env:
+      WORKDIR: app
+      JAVA_VERSION: "17"
+      FLUTTER_CHANNEL: "stable"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Java 17
+      - name: Set up Java ${{ env.JAVA_VERSION }}
         uses: actions/setup-java@v4
         with:
-          distribution: temurin
-          java-version: '17'
+          distribution: "temurin"
+          java-version: ${{ env.JAVA_VERSION }}
 
-      - name: Set up Flutter (stable)
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Flutter (${{ env.FLUTTER_CHANNEL }})
         uses: subosito/flutter-action@v2
         with:
-          channel: stable
+          channel: ${{ env.FLUTTER_CHANNEL }}
           cache: true
 
       - name: Flutter doctor
         run: flutter doctor -v
 
-      - name: Ensure app/android exists (v2 embedding)
-        working-directory: ./app
-        shell: bash
+      - name: Ensure Flutter Android wrapper
+        working-directory: ${{ env.WORKDIR }}
         run: |
-          set -e
-          if [ ! -f pubspec.yaml ]; then
-            echo "::error ::app/pubspec.yaml not found"; exit 1;
-          fi
-          if [ ! -d android ]; then
-            flutter create --platforms=android --org com.naivefox --project-name bp_logger .
+          if [ ! -d "android" ]; then
+            flutter create --platforms=android .
           fi
 
-      - name: Patch Gradle (Java17 + desugaring)
-        shell: bash
-        run: |
-          python3 tools/patch_gradle.py app/android
-
-      - name: Force v2 embedding meta in AndroidManifest
-        working-directory: ./app
-        shell: bash
-        run: |
-          set -e
-          M=android/app/src/main/AndroidManifest.xml
-          if [ ! -f "$M" ]; then
-            echo "::error ::Manifest not found at $M"; exit 1;
-          fi
-          # убрать наследие v1, если промелькнёт
-          sed -i '/android:name="\${applicationName}"/d' "$M" || true
-
-          # корректно вставить meta-data ТОЛЬКО если её ещё нет
-          if ! grep -q 'flutterEmbedding' "$M"; then
-            awk '
-              BEGIN{ins=0}
-              /<application[^>]*>/ && ins==0 {
-                print
-                print "        <meta-data android:name=\"flutterEmbedding\" android:value=\"2\" />"
-                ins=1
-                next
-              }
-              {print}
-            ' "$M" > "$M.tmp"
-            mv "$M.tmp" "$M"
-          fi
-
-      - name: Flutter pub get
-        working-directory: ./app
+      - name: Pub get
+        working-directory: ${{ env.WORKDIR }}
         run: flutter pub get
 
-      - name: Build release APK
-        working-directory: ./app
-        run: flutter build apk --release --target=lib/main.dart
+      # ВАЖНО: передаём В КОРЕНЬ ПРОЕКТА (app), а не app/android
+      - name: Patch Gradle/Kotlin/Desugaring
+        run: |
+          python3 tools/patch_gradle.py "$WORKDIR"
 
-      - name: Upload APK
+      - name: Verify desugaring wired
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          echo "== android/app/build.gradle =="
+          cat android/app/build.gradle
+          echo "== Check for coreLibraryDesugaring entry =="
+          grep -q 'coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:' android/app/build.gradle || { echo "::error ::coreLibraryDesugaring dependency not found"; exit 1; }
+
+      - name: Build release APK
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          flutter clean
+          flutter build apk --release -v
+
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: app-release
+          name: app-release.apk
           path: app/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
