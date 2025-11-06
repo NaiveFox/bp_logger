@@ -1,492 +1,561 @@
-import 'dart:async';
-import 'dart:io';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-import 'package:timezone/data/latest.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
+import 'package:timezone/data/latest.dart' as tzdata;
 import 'package:google_fonts/google_fonts.dart';
 
-void main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  tz.initializeTimeZones();
-  runApp(const App());
+  runApp(const BpApp());
 }
 
-class App extends StatelessWidget {
-  const App({super.key});
+class BpApp extends StatelessWidget {
+  const BpApp({super.key});
   @override
   Widget build(BuildContext context) {
-    final scheme = ColorScheme.fromSeed(seedColor: const Color(0xFF6D4DCF));
+    final theme = ThemeData(
+      useMaterial3: true,
+      colorSchemeSeed: const Color(0xFF3C7BEA),
+      textTheme: GoogleFonts.interTextTheme(),
+    );
     return MaterialApp(
+      debugShowCheckedModeBanner: false,
       title: 'BP Logger+',
-      theme: ThemeData(
-        colorScheme: scheme,
-        useMaterial3: true,
-        textTheme: GoogleFonts.interTextTheme(),
-      ),
-      home: const Home(),
+      theme: theme,
+      home: const HomeScreen(),
     );
   }
 }
 
-class Record {
+class Measurement {
   final DateTime ts;
   final int sys;
   final int dia;
-  final int? pulse;
-  final String? note;
-  Record(this.ts, this.sys, this.dia, this.pulse, this.note);
+  final int pulse;
+
+  Measurement({
+    required this.ts,
+    required this.sys,
+    required this.dia,
+    required this.pulse,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'ts': ts.toIso8601String(),
+        'sys': sys,
+        'dia': dia,
+        'pulse': pulse,
+      };
+
+  static Measurement fromJson(Map<String, dynamic> j) => Measurement(
+        ts: DateTime.parse(j['ts'] as String),
+        sys: j['sys'] as int,
+        dia: j['dia'] as int,
+        pulse: j['pulse'] as int,
+      );
 }
 
-class Home extends StatefulWidget {
-  const Home({super.key});
+enum Period { h24, d7, d30, custom }
+
+class HomeScreen extends StatefulWidget {
+  const HomeScreen({super.key});
   @override
-  State<Home> createState() => _HomeState();
+  State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeState extends State<Home> with TickerProviderStateMixin {
-  final List<Record> _items = [];
-  late final TabController _tabs;
-  // notifications
-  final _notifs = FlutterLocalNotificationsPlugin();
-  TimeOfDay? _reminderTime;
-  bool _reminderEnabled = false;
+class _HomeScreenState extends State<HomeScreen> {
+  final DateFormat dFmt = DateFormat('dd.MM.yy');
+  final DateFormat tFmt = DateFormat('HH:mm');
+
+  List<Measurement> _items = [];
+  bool _notifEnabled = false;
+  TimeOfDay _notifTime = const TimeOfDay(hour: 9, minute: 0);
+
+  Period _period = Period.h24;
+  DateTimeRange? _customRange;
+
+  final FlutterLocalNotificationsPlugin _fln =
+      FlutterLocalNotificationsPlugin();
 
   @override
   void initState() {
     super.initState();
-    _tabs = TabController(length: 3, vsync: this);
+    _loadAll();
     _initNotifications();
   }
 
   Future<void> _initNotifications() async {
-    const android = AndroidInitializationSettings('@mipmap/ic_launcher');
-    await _notifs.initialize(const InitializationSettings(android: android));
-    if (Platform.isAndroid) {
-      final androidSpecifics = await _notifs
-          .resolvePlatformSpecificImplementation<
-              AndroidFlutterLocalNotificationsPlugin>();
-      await androidSpecifics?.requestNotificationsPermission();
+    tzdata.initializeTimeZones();
+    const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
+    await _fln.initialize(const InitializationSettings(android: androidInit));
+    // Пробуем запросить разрешения (Android 13+)
+    final androidImpl =
+        _fln.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+    await androidImpl?.requestNotificationsPermission();
+  }
+
+  Future<void> _loadAll() async {
+    final sp = await SharedPreferences.getInstance();
+    final raw = sp.getString('records');
+    final notifOn = sp.getBool('notif_on') ?? false;
+    final notifHour = sp.getInt('notif_h') ?? 9;
+    final notifMin = sp.getInt('notif_m') ?? 0;
+
+    List<Measurement> items = [];
+    if (raw != null && raw.isNotEmpty) {
+      try {
+        final list = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
+        items = list.map(Measurement.fromJson).toList();
+      } catch (_) {}
+    }
+    setState(() {
+      _items = items..sort((a, b) => a.ts.compareTo(b.ts));
+      _notifEnabled = notifOn;
+      _notifTime = TimeOfDay(hour: notifHour, minute: notifMin);
+    });
+    if (_notifEnabled) {
+      await _scheduleDaily(_notifTime);
+    } else {
+      await _fln.cancel(1001);
     }
   }
 
-  Future<void> _scheduleDaily(TimeOfDay time) async {
-    _reminderTime = time;
-    _reminderEnabled = true;
+  Future<void> _saveAll() async {
+    final sp = await SharedPreferences.getInstance();
+    final data = jsonEncode(_items.map((e) => e.toJson()).toList());
+    await sp.setString('records', data);
+  }
+
+  Future<void> _toggleNotifications(bool v) async {
+    final sp = await SharedPreferences.getInstance();
+    await sp.setBool('notif_on', v);
+    setState(() => _notifEnabled = v);
+    if (v) {
+      await _scheduleDaily(_notifTime);
+    } else {
+      await _fln.cancel(1001);
+    }
+  }
+
+  Future<void> _pickNotifTime() async {
+    final picked =
+        await showTimePicker(context: context, initialTime: _notifTime);
+    if (picked != null) {
+      final sp = await SharedPreferences.getInstance();
+      await sp.setInt('notif_h', picked.hour);
+      await sp.setInt('notif_m', picked.minute);
+      setState(() => _notifTime = picked);
+      if (_notifEnabled) {
+        await _scheduleDaily(_notifTime);
+      }
+    }
+  }
+
+  Future<void> _scheduleDaily(TimeOfDay t) async {
     final now = DateTime.now();
-    final tzLoc = tz.getLocation(DateTime.now().timeZoneName);
-    final first = DateTime(
-        now.year, now.month, now.day, time.hour, time.minute);
-    final firstTz = tz.TZDateTime.from(
-        first.isBefore(now) ? first.add(const Duration(days: 1)) : first, tzLoc);
-    await _notifs.zonedSchedule(
+    final dtToday = DateTime(now.year, now.month, now.day, t.hour, t.minute);
+    final next =
+        dtToday.isAfter(now) ? dtToday : dtToday.add(const Duration(days: 1));
+    await _fln.zonedSchedule(
       1001,
-      'BP Logger+',
-      'Пора записать давление',
-      firstTz,
+      'Пора измерить давление',
+      'Запиши показания — это займёт 10 секунд',
+      tz.TZDateTime.from(next, tz.local),
       const NotificationDetails(
         android: AndroidNotificationDetails(
-          'bp_daily', 'Daily Reminder',
-          importance: Importance.max, priority: Priority.high)),
+          'bp_daily',
+          'Ежедневные напоминания',
+          importance: Importance.high,
+          priority: Priority.high,
+        ),
+      ),
+      androidAllowWhileIdle: true,
       uiLocalNotificationDateInterpretation:
           UILocalNotificationDateInterpretation.absoluteTime,
-      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
       matchDateTimeComponents: DateTimeComponents.time,
     );
-    setState(() {});
   }
-
-  Future<void> _cancelDaily() async {
-    await _notifs.cancel(1001);
-    _reminderEnabled = false;
-    _reminderTime = null;
-    setState(() {});
-  }
-
-  // --- UI helpers
-  String _fmt(DateTime d) => DateFormat('dd.MM.yyyy, HH:mm').format(d);
 
   Future<void> _addNow() async {
-    final r = await showDialog<Record>(
-      context: context,
-      builder: (_) => _RecordDialog(initial: DateTime.now()),
-    );
-    if (r != null) setState(() => _items.add(r));
-  }
-
-  Future<void> _addBackdate() async {
-    final r = await showDialog<Record>(
-      context: context,
-      builder: (_) => _RecordDialog(backdate: true, initial: DateTime.now()),
-    );
-    if (r != null) setState(() => _items.add(r));
-  }
-
-  // export: CSV и markdown-таблица
-  Future<void> _share() async {
-    final period = await _pickPeriod(context);
-    if (period == null) return;
-    final from = period.$1, to = period.$2;
-    final data = _items
-        .where((e) => !e.ts.isBefore(from) && !e.ts.isAfter(to))
-        .toList()
-      ..sort((a, b) => a.ts.compareTo(b.ts));
-
-    final csvHeader = "timestamp;date;time;sys;dia;pulse;note";
-    final csvRows = data.map((e) {
-      final date = DateFormat('dd.MM.yyyy').format(e.ts);
-      final time = DateFormat('HH:mm').format(e.ts);
-      return "${e.ts.toIso8601String()};$date;$time;${e.sys};${e.dia};${e.pulse ?? ""};\"${e.note ?? ""}\"";
-    }).join("\n");
-
-    final pretty = StringBuffer()
-      ..writeln(
-          "BP Logger+ — экспорт за период ${_fmt(from)} — ${_fmt(to)}")
-      ..writeln("| Дата | Время | SYS | DIA | Пульс |")
-      ..writeln("|---|---:|---:|---:|---:|");
-    for (final e in data) {
-      pretty.writeln(
-          "| ${DateFormat('dd.MM.yyyy').format(e.ts)} | ${DateFormat('HH:mm').format(e.ts)} | ${e.sys} | ${e.dia} | ${e.pulse ?? ''} |");
+    final rec = await _showAddDialog(initialTs: DateTime.now());
+    if (rec != null) {
+      setState(() {
+        _items.add(rec);
+        _items.sort((a, b) => a.ts.compareTo(b.ts));
+      });
+      await _saveAll();
     }
-
-    final dir = Directory.systemTemp;
-    final csvFile = File("${dir.path}/bp_export.csv");
-    final mdFile = File("${dir.path}/bp_export.md");
-    await csvFile.writeAsString("$csvHeader\n$csvRows");
-    await mdFile.writeAsString(pretty.toString());
-
-    await Share.shareXFiles([
-      XFile(csvFile.path, name: "bp_export.csv"),
-      XFile(mdFile.path, name: "bp_export_${DateFormat('yyyyMMdd_HHmm').format(DateTime.now())}.md"),
-    ]);
   }
 
-  Future<(DateTime, DateTime)?> _pickPeriod(BuildContext ctx) async {
-    final now = DateTime.now();
-    DateTime from = now.subtract(const Duration(days: 7));
-    DateTime to = now;
-    return await showDialog<(DateTime, DateTime)>(
-      context: ctx,
-      builder: (_) => AlertDialog(
-        title: const Text("Период для экспорта/графика"),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Wrap(
-              spacing: 8, runSpacing: 8,
-              children: [
-                OutlinedButton(onPressed: () {
-                  from = now.subtract(const Duration(days:7)); to = now;
-                  Navigator.pop(ctx, (from, to));
-                }, child: const Text("7 дней")),
-                OutlinedButton(onPressed: () {
-                  from = now.subtract(const Duration(days:30)); to = now;
-                  Navigator.pop(ctx, (from, to));
-                }, child: const Text("30 дней")),
-                OutlinedButton(onPressed: () async {
-                  final df = await showDatePicker(context: ctx,
-                    firstDate: DateTime(2020), lastDate: now, initialDate: from);
-                  if (df == null) return;
-                  final dt = await showDatePicker(context: ctx,
-                    firstDate: DateTime(2020), lastDate: now, initialDate: to);
-                  if (dt == null) return;
-                  Navigator.pop(ctx, (DateTime(df.year,df.month,df.day), DateTime(dt.year,dt.month,dt.day,23,59)));
-                }, child: const Text("Выбрать…")),
-              ],
-            )
+  Future<void> _addBackDated() async {
+    final date = await showDatePicker(
+      context: context,
+      firstDate: DateTime(2015),
+      lastDate: DateTime.now(),
+      initialDate: DateTime.now(),
+      helpText: 'Выбери дату',
+    );
+    if (date == null) return;
+    final time = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.now(),
+      helpText: 'Выбери время',
+    );
+    if (time == null) return;
+    final ts =
+        DateTime(date.year, date.month, date.day, time.hour, time.minute);
+    final rec = await _showAddDialog(initialTs: ts);
+    if (rec != null) {
+      setState(() {
+        _items.add(rec);
+        _items.sort((a, b) => a.ts.compareTo(b.ts));
+      });
+      await _saveAll();
+    }
+  }
+
+  Future<Measurement?> _showAddDialog({required DateTime initialTs}) async {
+    final sysCtrl = TextEditingController();
+    final diaCtrl = TextEditingController();
+    final pulCtrl = TextEditingController();
+
+    return showDialog<Measurement>(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Text('Новые показания'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _LabeledField(label: 'SYS (верхнее)', controller: sysCtrl),
+              const SizedBox(height: 8),
+              _LabeledField(label: 'DIA (нижнее)', controller: diaCtrl),
+              const SizedBox(height: 8),
+              _LabeledField(label: 'PULSE (пульс)', controller: pulCtrl),
+              const SizedBox(height: 8),
+              Text(
+                'Время: ${dFmt.format(initialTs)}, ${tFmt.format(initialTs)}',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Отмена'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final s = int.tryParse(sysCtrl.text.trim());
+                final d = int.tryParse(diaCtrl.text.trim());
+                final p = int.tryParse(pulCtrl.text.trim());
+                if (s == null || d == null || p == null) return;
+                Navigator.pop(
+                  ctx,
+                  Measurement(ts: initialTs, sys: s, dia: d, pulse: p),
+                );
+              },
+              child: const Text('Сохранить'),
+            ),
           ],
-        ),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final tabs = ["Запись", "Графики", "Напоминания"];
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text("BP Logger+"),
-        actions: [
-          IconButton(icon: const Icon(Icons.ios_share), onPressed: _share),
-        ],
-        bottom: TabBar(controller: _tabs, tabs: [
-          for (final t in tabs) Tab(text: t),
-        ]),
-      ),
-      body: TabBarView(
-        controller: _tabs,
-        children: [
-          _buildInputTab(),
-          _buildChartsTab(),
-          _buildRemindersTab(),
-        ],
-      ),
-      floatingActionButton: _tabs.index == 0 ? _fab() : null,
-    );
-  }
-
-  Widget _fab() => Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          FloatingActionButton.extended(
-            onPressed: _addNow,
-            icon: const Icon(Icons.add),
-            label: const Text("Записать сейчас"),
-          ),
-          const SizedBox(height: 12),
-          FloatingActionButton.extended(
-            onPressed: _addBackdate,
-            icon: const Icon(Icons.schedule),
-            label: const Text("За другую дату/время"),
-            backgroundColor: Theme.of(context).colorScheme.secondaryContainer,
-          ),
-        ],
-      );
-
-  Widget _buildInputTab() {
-    if (_items.isEmpty) {
-      return Center(
-        child: Text("Пока записей нет. Жми «Записать сейчас».",
-            style: Theme.of(context).textTheme.titleMedium),
-      );
-    }
-    final items = _items..sort((a,b)=>b.ts.compareTo(a.ts));
-    return ListView.separated(
-      padding: const EdgeInsets.all(12),
-      itemBuilder: (_, i) {
-        final e = items[i];
-        return ListTile(
-          title: Text("${e.sys}/${e.dia}  ${e.pulse!=null? '• ${e.pulse} bpm':''}"),
-          subtitle: Text(_fmt(e.ts)),
-          trailing: IconButton(
-            icon: const Icon(Icons.delete_outline),
-            onPressed: () { setState(()=>_items.remove(e)); },
-          ),
         );
       },
-      separatorBuilder: (_, __) => const Divider(height: 0),
-      itemCount: items.length,
     );
   }
 
-  Widget _buildChartsTab() {
+  List<Measurement> _filtered() {
     final now = DateTime.now();
-    final from = now.subtract(const Duration(days: 7));
-    final view = _items.where((e) => e.ts.isAfter(from)).toList()
-      ..sort((a,b)=>a.ts.compareTo(b.ts));
-
-    if (view.isEmpty) {
-      return Center(child: Text("Нет данных за последние 7 дней"));
+    DateTime from;
+    switch (_period) {
+      case Period.h24:
+        from = now.subtract(const Duration(hours: 24));
+        break;
+      case Period.d7:
+        from = now.subtract(const Duration(days: 7));
+        break;
+      case Period.d30:
+        from = now.subtract(const Duration(days: 30));
+        break;
+      case Period.custom:
+        if (_customRange == null) return _items;
+        from = _customRange!.start;
+        break;
     }
-
-    List<FlSpot> sSys = [], sDia = [], sPulse = [];
-    final base = view.first.ts.millisecondsSinceEpoch.toDouble();
-    for (final e in view) {
-      final x = (e.ts.millisecondsSinceEpoch - base) / (1000*60*60); // часы
-      sSys.add(FlSpot(x, e.sys.toDouble()));
-      sDia.add(FlSpot(x, e.dia.toDouble()));
-      if (e.pulse != null) sPulse.add(FlSpot(x, e.pulse!.toDouble()));
-    }
-
-    String fmtX(double x) {
-      final dt = DateTime.fromMillisecondsSinceEpoch((x*3600000).toInt() + base.toInt());
-      return DateFormat('dd.MM HH:mm').format(dt);
-    }
-
-    Widget line(List<FlSpot> data, String name) {
-      return LineChart(
-        LineChartData(
-          titlesData: FlTitlesData(
-            leftTitles: AxisTitles(sideTitles: SideTitles(showTitles: true, reservedSize: 40)),
-            bottomTitles: AxisTitles(sideTitles: SideTitles(showTitles: true, getTitlesWidget: (v, meta){
-              return Transform.rotate(
-                angle: -0.6,
-                child: Text(fmtX(v), style: const TextStyle(fontSize: 10)),
-              );
-            })),
-            rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-            topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-          ),
-          gridData: const FlGridData(show: true),
-          lineBarsData: [
-            LineChartBarData(spots: data, isCurved: true, dotData: const FlDotData(show: true)),
-          ],
-        ),
-      );
-    }
-
-    return Padding(
-      padding: const EdgeInsets.all(12),
-      child: ListView(
-        children: [
-          Text("Систолическое (SYS)", style: Theme.of(context).textTheme.titleMedium),
-          SizedBox(height: 220, child: line(sSys, "SYS")),
-          const SizedBox(height: 16),
-          Text("Диастолическое (DIA)", style: Theme.of(context).textTheme.titleMedium),
-          SizedBox(height: 220, child: line(sDia, "DIA")),
-          const SizedBox(height: 16),
-          Text("Пульс", style: Theme.of(context).textTheme.titleMedium),
-          SizedBox(height: 220, child: line(sPulse, "Pulse")),
-          const SizedBox(height: 12),
-          FilledButton.icon(
-            onPressed: () async {
-              final p = await _pickPeriod(context);
-              if (p == null) return;
-              setState(() {}); // в MVP просто перерисуем
-            },
-            icon: const Icon(Icons.timeline),
-            label: const Text("Выбрать период для графиков"),
-          )
-        ],
-      ),
-    );
+    final to = _period == Period.custom && _customRange != null
+        ? _customRange!.end
+        : now;
+    return _items.where((e) => e.ts.isAfter(from) && e.ts.isBefore(to)).toList();
   }
 
-  Widget _buildRemindersTab() {
-    return Padding(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SwitchListTile(
-            title: const Text("Ежедневное напоминание"),
-            subtitle: Text(_reminderEnabled
-                ? "Время: ${_reminderTime?.format(context) ?? '--:--'}"
-                : "Выключено"),
-            value: _reminderEnabled,
-            onChanged: (v) async {
-              if (v) {
-                final t = await showTimePicker(
-                  context: context,
-                  initialTime: const TimeOfDay(hour: 10, minute: 0),
-                  builder: (ctx, child) => MediaQuery(
-                    data: MediaQuery.of(ctx).copyWith(alwaysUse24HourFormat: true),
-                    child: child!,
-                  ),
-                );
-                if (t != null) await _scheduleDaily(t);
-              } else {
-                await _cancelDaily();
-              }
-            },
-          ),
-          const SizedBox(height: 8),
-          if (_reminderEnabled)
-            OutlinedButton.icon(
-              onPressed: _cancelDaily,
-              icon: const Icon(Icons.delete_outline),
-              label: const Text("Удалить напоминание"),
-            ),
-        ],
-      ),
+  Future<void> _pickCustomRange() async {
+    final now = DateTime.now();
+    final picked = await showDateRangePicker(
+      context: context,
+      firstDate: DateTime(2015),
+      lastDate: now,
+      initialDateRange: _customRange ??
+          DateTimeRange(start: now.subtract(const Duration(days: 7)), end: now),
+      helpText: 'Выбери период',
     );
+    if (picked != null) {
+      setState(() {
+        _period = Period.custom;
+        _customRange = picked;
+      });
+    }
   }
-}
 
-class _RecordDialog extends StatefulWidget {
-  final bool backdate;
-  final DateTime initial;
-  const _RecordDialog({required this.initial, this.backdate=false});
-  @override
-  State<_RecordDialog> createState() => _RecordDialogState();
-}
+  Future<void> _share() async {
+    final list = _filtered();
+    if (list.isEmpty) return;
 
-class _RecordDialogState extends State<_RecordDialog> {
-  late DateTime ts;
-  final sys = TextEditingController();
-  final dia = TextEditingController();
-  final pulse = TextEditingController();
-  final note = TextEditingController();
+    final buf = StringBuffer();
+    final String title;
+    switch (_period) {
+      case Period.h24:
+        title = 'Последние 24 часа';
+        break;
+      case Period.d7:
+        title = 'Последние 7 дней';
+        break;
+      case Period.d30:
+        title = 'Последние 30 дней';
+        break;
+      case Period.custom:
+        final s = dFmt.format(_customRange!.start);
+        final e = dFmt.format(_customRange!.end);
+        title = 'Период: $s — $e';
+        break;
+    }
 
-  @override
-  void initState() {
-    super.initState();
-    ts = widget.initial;
+    buf.writeln('BP Logger+ — $title');
+    buf.writeln('Дата; Время; SYS; DIA; PULSE');
+
+    for (final m in list) {
+      buf.writeln(
+          '${dFmt.format(m.ts)}; ${tFmt.format(m.ts)}; ${m.sys}; ${m.dia}; ${m.pulse}');
+    }
+
+    await Share.share(buf.toString(), subject: 'Показания давления — $title');
   }
 
   @override
   Widget build(BuildContext context) {
-    return AlertDialog(
-      title: Text(widget.backdate ? "Запись за другую дату" : "Записать сейчас"),
-      content: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (widget.backdate)
-              Row(children: [
-                Expanded(child: OutlinedButton(
-                  onPressed: () async {
-                    final d = await showDatePicker(
-                      context: context,
-                      firstDate: DateTime(2020),
-                      lastDate: DateTime.now(),
-                      initialDate: ts,
-                    );
-                    if (d != null) setState(() => ts = DateTime(d.year,d.month,d.day,ts.hour,ts.minute));
-                  },
-                  child: Text(DateFormat('dd.MM.yyyy').format(ts)),
-                )),
-                const SizedBox(width: 8),
-                Expanded(child: OutlinedButton(
-                  onPressed: () async {
-                    final t = await showTimePicker(
-                      context: context,
-                      initialTime: TimeOfDay.fromDateTime(ts),
-                      builder: (ctx, child) => MediaQuery(
-                        data: MediaQuery.of(ctx).copyWith(alwaysUse24HourFormat: true),
-                        child: child!,
-                      ),
-                    );
-                    if (t != null) setState(() => ts = DateTime(ts.year,ts.month,ts.day,t.hour,t.minute));
-                  },
-                  child: Text(DateFormat('HH:mm').format(ts)),
-                )),
-              ]),
-            const SizedBox(height: 8),
-            _num(sys, "SYS", "120"),
-            const SizedBox(height: 8),
-            _num(dia, "DIA", "80"),
-            const SizedBox(height: 8),
-            _num(pulse, "Пульс (по жел.)", "70", optional: true),
-            const SizedBox(height: 8),
-            TextField(
-              controller: note,
-              decoration: const InputDecoration(
-                labelText: "Заметка (опционально)",
-                border: OutlineInputBorder(),
+    final filtered = _filtered();
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('BP Logger+'),
+        actions: [
+          IconButton(
+            tooltip: 'Поделиться',
+            onPressed: _share,
+            icon: const Icon(Icons.ios_share),
+          ),
+        ],
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          // Большая основная кнопка
+          FilledButton.tonal(
+            onPressed: _addNow,
+            style: FilledButton.styleFrom(
+              padding: const EdgeInsets.symmetric(vertical: 18),
+            ),
+            child: const Text('Записать сейчас'),
+          ),
+          const SizedBox(height: 8),
+          OutlinedButton(
+            onPressed: _addBackDated,
+            child: const Text('Записать задним числом'),
+          ),
+          const SizedBox(height: 16),
+
+          // Напоминания
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('Напоминания'),
+                        const SizedBox(height: 4),
+                        Text(
+                          _notifEnabled
+                              ? 'Ежедневно в ${_notifTime.format(context)}'
+                              : 'Выключены',
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ],
+                    ),
+                  ),
+                  Switch(value: _notifEnabled, onChanged: _toggleNotifications),
+                  const SizedBox(width: 8),
+                  IconButton(
+                    tooltip: 'Время напоминания',
+                    onPressed: _pickNotifTime,
+                    icon: const Icon(Icons.schedule),
+                  ),
+                ],
               ),
             ),
-          ],
+          ),
+
+          const SizedBox(height: 16),
+
+          // Выбор периода
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              ChoiceChip(
+                label: const Text('24ч'),
+                selected: _period == Period.h24,
+                onSelected: (_) => setState(() => _period = Period.h24),
+              ),
+              ChoiceChip(
+                label: const Text('7 дней'),
+                selected: _period == Period.d7,
+                onSelected: (_) => setState(() => _period = Period.d7),
+              ),
+              ChoiceChip(
+                label: const Text('30 дней'),
+                selected: _period == Period.d30,
+                onSelected: (_) => setState(() => _period = Period.d30),
+              ),
+              ActionChip(
+                label: const Text('Период…'),
+                onPressed: _pickCustomRange,
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 12),
+
+          // График
+          if (filtered.isEmpty)
+            const Center(
+                child: Padding(
+              padding: EdgeInsets.all(24),
+              child: Text('Нет данных за выбранный период'),
+            ))
+          else
+            SizedBox(
+              height: 260,
+              child: LineChart(_buildChartData(filtered)),
+            ),
+
+          const SizedBox(height: 16),
+
+          // Таблица последних записей
+          Text('Последние записи',
+              style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 8),
+          ...filtered.reversed.take(10).map((m) => ListTile(
+                dense: true,
+                leading: const Icon(Icons.favorite_border),
+                title:
+                    Text('${m.sys}/${m.dia}  ·  ${m.pulse} уд/мин'),
+                subtitle: Text(
+                    '${dFmt.format(m.ts)}, ${tFmt.format(m.ts)}'),
+              )),
+        ],
+      ),
+    );
+  }
+
+  LineChartData _buildChartData(List<Measurement> list) {
+    // Превращаем в точки: X = индекс (слева направо), Y — значения
+    final spotsSys = <FlSpot>[];
+    final spotsDia = <FlSpot>[];
+    final spotsPul = <FlSpot>[];
+
+    for (var i = 0; i < list.length; i++) {
+      spotsSys.add(FlSpot(i.toDouble(), list[i].sys.toDouble()));
+      spotsDia.add(FlSpot(i.toDouble(), list[i].dia.toDouble()));
+      spotsPul.add(FlSpot(i.toDouble(), list[i].pulse.toDouble()));
+    }
+
+    String bottomTitle(double x) {
+      final idx = x.round().clamp(0, list.length - 1);
+      final ts = list[idx].ts;
+      // Если в пределах суток — показываем время, иначе дату
+      final isSameDay = ts.isAfter(DateTime.now().subtract(const Duration(hours: 24)));
+      return isSameDay ? tFmt.format(ts) : dFmt.format(ts);
+    }
+
+    return LineChartData(
+      minX: 0,
+      maxX: (list.length - 1).toDouble(),
+      lineTouchData: const LineTouchData(enabled: true),
+      gridData: const FlGridData(show: true),
+      titlesData: FlTitlesData(
+        leftTitles: const AxisTitles(
+          sideTitles: SideTitles(showTitles: true, reservedSize: 36),
+        ),
+        rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+        topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+        bottomTitles: AxisTitles(
+          sideTitles: SideTitles(
+            showTitles: true,
+            interval: (list.length / 6).clamp(1, 6).toDouble(),
+            getTitlesWidget: (value, meta) {
+              return SideTitleWidget(
+                axisSide: meta.axisSide,
+                child: Text(
+                  bottomTitle(value),
+                  style: const TextStyle(fontSize: 10),
+                ),
+              );
+            },
+          ),
         ),
       ),
-      actions: [
-        TextButton(onPressed: ()=>Navigator.pop(context), child: const Text("Отмена")),
-        FilledButton(
-          onPressed: () {
-            final s = int.tryParse(sys.text);
-            final d = int.tryParse(dia.text);
-            final p = pulse.text.isEmpty ? null : int.tryParse(pulse.text);
-            if (s==null || d==null) return;
-            Navigator.pop(context, Record(ts, s, d, p, note.text.isEmpty? null : note.text));
-          },
-          child: const Text("Сохранить"),
-        )
+      lineBarsData: [
+        LineChartBarData(
+          spots: spotsSys,
+          isCurved: true,
+          barWidth: 2,
+          dotData: const FlDotData(show: false),
+        ),
+        LineChartBarData(
+          spots: spotsDia,
+          isCurved: true,
+          barWidth: 2,
+          dotData: const FlDotData(show: false),
+        ),
+        LineChartBarData(
+          spots: spotsPul,
+          isCurved: true,
+          barWidth: 2,
+          dotData: const FlDotData(show: false),
+        ),
       ],
     );
   }
+}
 
-  Widget _num(TextEditingController c, String label, String hint, {bool optional=false}) {
+class _LabeledField extends StatelessWidget {
+  final String label;
+  final TextEditingController controller;
+  const _LabeledField({required this.label, required this.controller, super.key});
+
+  @override
+  Widget build(BuildContext context) {
     return TextField(
-      controller: c,
+      controller: controller,
       keyboardType: TextInputType.number,
       decoration: InputDecoration(
         labelText: label,
-        hintText: hint,
         border: const OutlineInputBorder(),
-        suffixText: optional ? "опц." : null,
       ),
     );
   }
