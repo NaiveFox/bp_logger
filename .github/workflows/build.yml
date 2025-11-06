@@ -53,27 +53,31 @@ jobs:
         working-directory: ${{ env.WORKDIR }}
         run: flutter pub get
 
-      - name: Patch Gradle/Kotlin/Desugaring (Groovy or KTS)
+      - name: Patch Gradle/Kotlin/Desugaring (Groovy or KTS) + settings
         run: |
           python3 tools/patch_gradle.py "$WORKDIR"
+
+      - name: Print gradle settings (debug)
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          echo "== android/settings.gradle (if any) ==" && (cat android/settings.gradle 2>/dev/null || true)
+          echo "== android/settings.gradle.kts (if any) ==" && (cat android/settings.gradle.kts 2>/dev/null || true)
 
       - name: Verify desugaring wired (Groovy/KTS)
         working-directory: ${{ env.WORKDIR }}
         shell: bash
         run: |
           set -e
-          FILE_GROOVY="android/app/build.gradle"
-          FILE_KTS="android/app/build.gradle.kts"
-          if [ -f "$FILE_GROOVY" ]; then
-            echo "== $FILE_GROOVY =="
-            cat "$FILE_GROOVY"
-            grep -q 'coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:' "$FILE_GROOVY"
-          elif [ -f "$FILE_KTS" ]; then
-            echo "== $FILE_KTS =="
-            cat "$FILE_KTS"
-            grep -q 'coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:' "$FILE_KTS"
+          FILE_G="android/app/build.gradle"
+          FILE_K="android/app/build.gradle.kts"
+          if [ -f "$FILE_G" ]; then
+            echo "== $FILE_G ==" && cat "$FILE_G"
+            grep -q 'coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:' "$FILE_G"
+          elif [ -f "$FILE_K" ]; then
+            echo "== $FILE_K ==" && cat "$FILE_K"
+            grep -q 'coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:' "$FILE_K"
           else
-            echo "::error ::Neither build.gradle nor build.gradle.kts found"; exit 1
+            echo "::error ::Neither build.gradle nor build.gradle.kts found in android/app"; exit 1
           fi
 
       - name: Build release APK
