@@ -1,38 +1,62 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -euxo pipefail
 
-echo ">> checking Flutter version"
-flutter --version
+echo ">> Flutter: $(flutter --version | head -n1)"
 
-# 1. Если есть app/, скопировать в корень
-if [ -d "app" ]; then
-  echo ">> copying app/ into repo root"
-  cp -r app/lib . 2>/dev/null || true
-  cp -r app/pubspec.yaml . 2>/dev/null || true
+# 0) На раннере мог остаться мусор от прошлых запусков
+rm -rf android || true
+
+# 1) Создаём ЧИСТЫЙ android-хост (в2 embedding по умолчанию)
+flutter create --platforms=android --org com.naivefox --project-name bp_logger .
+
+# 2) Перекладываем твой код: app/lib -> lib (точка входа останется lib/main.dart)
+if [ -d app/lib ]; then
+  rm -rf lib
+  mkdir -p lib
+  cp -R app/lib/* lib/
 fi
 
-# 2. Создать android-проект, если отсутствует
-if [ ! -d "android" ]; then
-  echo ">> android/ not found: creating Flutter android skeleton"
-  PROJ_NAME=$(awk '/^name:/{print $2; exit}' pubspec.yaml 2>/dev/null || echo "bp_logger")
-  flutter create --org com.naivefox.bp --project-name "${PROJ_NAME}" --platforms android .
-else
-  echo ">> android/ already exists, skipping creation"
+# Если pubspec.yaml лежит в app/, используем его (иначе останется корневой)
+if [ -f app/pubspec.yaml ]; then
+  cp app/pubspec.yaml ./pubspec.yaml
 fi
 
-# 3. Обновить gradle.properties
-GP="android/gradle.properties"
-mkdir -p android
-touch "$GP"
-grep -q "android.useAndroidX=true" "$GP" || echo "android.useAndroidX=true" >> "$GP"
-grep -q "android.enableR8=true" "$GP" || echo "android.enableR8=true" >> "$GP"
-grep -q "android.nonTransitiveRClass=true" "$GP" || echo "android.nonTransitiveRClass=true" >> "$GP"
-grep -q "org.gradle.jvmargs" "$GP" || echo "org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8" >> "$GP"
-grep -q "kotlin.code.style=official" "$GP" || echo "kotlin.code.style=official" >> "$GP"
-grep -q "kotlin.incremental=true" "$GP" || echo "kotlin.incremental=true" >> "$GP"
+# 3) Приводим ID пакета к единому виду
+APP_KTS="android/app/build.gradle.kts"
+APP_GRADLE="android/app/build.gradle"
 
-# 4. Загрузить зависимости
-echo ">> running flutter pub get"
-flutter pub get
+if [ -f "$APP_KTS" ]; then
+  sed -i 's/^namespace = .*/namespace = "com.naivefox.bp_logger"/' "$APP_KTS" || true
+  sed -i 's/applicationId = ".*"/applicationId = "com.naivefox.bp_logger"/' "$APP_KTS" || true
+fi
 
-echo ">> bootstrap done ✅"
+if [ -f "$APP_GRADLE" ]; then
+  sed -i 's/^namespace .*=.*/namespace "com.naivefox.bp_logger"/' "$APP_GRADLE" || true
+  sed -i 's/applicationId ".*"/applicationId "com.naivefox.bp_logger"/' "$APP_GRADLE" || true
+fi
+
+# 4) gradle.properties — базовые флаги
+cat > android/gradle.properties <<'EOF'
+org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8
+android.useAndroidX=true
+android.enableJetifier=true
+EOF
+
+# 5) Чиним манифест под v2-эмбеддинг + фикс пути к Activity
+MANIFEST="android/app/src/main/AndroidManifest.xml"
+sed -i '/android:name="\${applicationName}"/d' "$MANIFEST" || true
+sed -i 's/android:name="\.MainActivity"/android:name="com.naivefox.bp_logger.MainActivity"/' "$MANIFEST" || true
+
+# Вставим маркер v2-эмбеддинга сразу после <application ...>
+awk '
+  BEGIN{ins=0}
+  /<application[^>]*>/ && ins==0 {
+    print
+    print "    <meta-data android:name=\"flutterEmbedding\" android:value=\"2\" />"
+    ins=1
+    next
+  }
+  {print}
+' "$MANIFEST" > "$MANIFEST.tmp" && mv "$MANIFEST.tmp" "$MANIFEST"
+
+echo ">> Bootstrap done ✅"
