@@ -25,7 +25,7 @@ jobs:
       - name: Set up Java ${{ env.JAVA_VERSION }}
         uses: actions/setup-java@v4
         with:
-          distribution: "temurin"
+          distribution: temurin
           java-version: ${{ env.JAVA_VERSION }}
 
       - name: Set up Python 3.11
@@ -42,30 +42,51 @@ jobs:
       - name: Flutter doctor
         run: flutter doctor -v
 
-      - name: Ensure Flutter Android wrapper
+      - name: Ensure fresh Android wrapper
         working-directory: ${{ env.WORKDIR }}
         run: |
-          if [ ! -d "android" ]; then
-            flutter create --platforms=android .
-          fi
+          rm -rf android
+          flutter create --platforms=android .
 
       - name: Pub get
         working-directory: ${{ env.WORKDIR }}
         run: flutter pub get
 
-      - name: Patch Android app Gradle (desugaring + Java17 + multidex + lint + packaging)
+      - name: Patch Android (Gradle+Manifest)
         run: |
-          python3 tools/patch_gradle.py "$WORKDIR"
+          python3 tools/patch_android.py "$WORKDIR"
 
       - name: Build release APK
         working-directory: ${{ env.WORKDIR }}
+        env:
+          GRADLE_OPTS: "-Dorg.gradle.warning.mode=all"
         run: |
           flutter clean
-          flutter build apk --release -v
+          flutter build apk --release -v --no-shrink --dart-define=CI=true
 
       - name: Upload APK artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: app-release.apk
           path: app/build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
+
+      - name: Collect Gradle diagnostics
+        if: always()
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          mkdir -p diag
+          find . -path "*/build/reports/problems/problems-report.html" -print -exec cp --parents {} diag/ \; || true
+          find android/app/build -name "*AndroidManifest*.xml" -print -exec cp --parents {} diag/ \; || true
+          find android/app/build -name "*.log" -print -exec cp --parents {} diag/ \; || true
+          cp -a android/settings.gradle* android/build.gradle* android/app/build.gradle* diag/ 2>/dev/null || true
+          (cd diag && zip -r ../gradle-diagnostics.zip .) || true
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-diagnostics
+          path: app/gradle-diagnostics.zip
+          if-no-files-found: ignore
