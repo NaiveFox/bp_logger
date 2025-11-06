@@ -1,142 +1,79 @@
 #!/usr/bin/env python3
-import pathlib, re, sys
+# -*- coding: utf-8 -*-
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
-APP_DIR = ROOT / "android" / "app"
-WRAPPER = ROOT / "android" / "gradle" / "wrapper" / "gradle-wrapper.properties"
+"""
+patch_gradle.py  —  минимальный и идемпотентный патчёр Gradle-проектов Flutter.
+Запуск из корня репо:  python3 tools/patch_gradle.py app/android
+Делает:
+  1) gradle/wrapper/gradle-wrapper.properties -> distributionUrl = gradle-8.11-all.zip (если ниже)
+  2) app/build.gradle(.kts): включает coreLibraryDesugaring и зависимость desugar_jdk_libs
+  3) app/build.gradle(.kts): compileOptions / kotlinOptions под Java 17
+Ничего не ломает, повторные запуски безопасны.
+"""
 
-DESUGAR_VER = "2.1.2"
+import sys, re, pathlib
 
-def read(p): return p.read_text(encoding="utf-8") if p.exists() else ""
-def write(p,s): p.write_text(s,encoding="utf-8"); print(f"patched: {p.relative_to(ROOT)}")
+ROOT = pathlib.Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else None
+if not ROOT or not ROOT.exists():
+    print("Usage: patch_gradle.py <path-to-android-dir>, e.g. app/android")
+    sys.exit(1)
 
-def ensure_gradle_wrapper():
-    if WRAPPER.exists():
-        s = read(WRAPPER)
-        s = re.sub(r"distributionUrl=.*",
-                   "distributionUrl=https\\://services.gradle.org/distributions/gradle-8.11.1-bin.zip",
-                   s)
-        write(WRAPPER, s)
+def read(p: pathlib.Path) -> str:
+    return p.read_text(encoding="utf-8") if p.exists() else ""
 
-def ensure_dependency_kts(s: str) -> str:
-    # вставить coreLibraryDesugaring(...) в существующий блок dependencies { ... } или создать новый
-    if re.search(r'coreLibraryDesugaring\s*\(', s):
-        return s
-    if re.search(r'^\s*dependencies\s*\{', s, flags=re.M):
-        return re.sub(
-            r'(^\s*dependencies\s*\{\s*)',
-            r'\1    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:%s")\n' % DESUGAR_VER,
-            s, count=1, flags=re.M
-        )
-    return s + (
-        "\ndependencies {\n"
-        f"    coreLibraryDesugaring(\"com.android.tools:desugar_jdk_libs:{DESUGAR_VER}\")\n"
-        "}\n"
-    )
+def write(p: pathlib.Path, s: str):
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(s, encoding="utf-8")
 
-def ensure_dependency_groovy(s: str) -> str:
-    if re.search(r"coreLibraryDesugaring\s+['\"]", s):
-        return s
-    if re.search(r'^\s*dependencies\s*\{', s, flags=re.M):
-        return re.sub(
-            r'(^\s*dependencies\s*\{\s*)',
-            r"\1    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:%s'\n" % DESUGAR_VER,
-            s, count=1, flags=re.M
-        )
-    return s + (
-        "\ndependencies {\n"
-        f"    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:{DESUGAR_VER}'\n"
-        "}\n"
-    )
-
-def ensure_android_block_kts(s: str) -> str:
-    # compileOptions + kotlinOptions + включение desugaring (Kotlin DSL)
-    if "isCoreLibraryDesugaringEnabled" not in s:
-        s = re.sub(
-            r"android\s*\{",
-            (
-                "android {\n"
-                "    compileOptions {\n"
-                "        sourceCompatibility = JavaVersion.VERSION_17\n"
-                "        targetCompatibility = JavaVersion.VERSION_17\n"
-                "        isCoreLibraryDesugaringEnabled = true\n"
-                "    }\n"
-            ),
-            s, count=1
-        )
-    if "kotlinOptions" not in s:
-        s = re.sub(
-            r"android\s*\{",
-            "android {\n    kotlinOptions {\n        jvmTarget = \"17\"\n    }\n",
-            s, count=1
-        )
-    return s
-
-def ensure_android_block_groovy(s: str) -> str:
-    if "coreLibraryDesugaringEnabled" not in s:
-        s = re.sub(
-            r"compileOptions\s*\{[^}]*\}",
-            (
-                "compileOptions {\n"
-                "    sourceCompatibility JavaVersion.VERSION_17\n"
-                "    targetCompatibility JavaVersion.VERSION_17\n"
-                "    coreLibraryDesugaringEnabled true\n"
-                "}"
-            ),
-            s, flags=re.DOTALL
-        )
-        if "compileOptions" not in s:
-            s = re.sub(
-                r"android\s*\{",
-                (
-                    "android {\n"
-                    "    compileOptions {\n"
-                    "        sourceCompatibility JavaVersion.VERSION_17\n"
-                    "        targetCompatibility JavaVersion.VERSION_17\n"
-                    "        coreLibraryDesugaringEnabled true\n"
-                    "    }\n"
-                ),
-                s, count=1
-            )
-    if "kotlinOptions" not in s:
-        s = re.sub(
-            r"android\s*\{",
-            "android {\n    kotlinOptions {\n        jvmTarget = '17'\n    }\n",
-            s, count=1
-        )
-    return s
-
-def patch_app_gradle():
-    gradle = APP_DIR / "build.gradle"
-    is_kts = False
-    if not gradle.exists():
-        gradle = APP_DIR / "build.gradle.kts"
-        is_kts = True
-    if not gradle.exists():
-        print("⚠ no app gradle file")
-        return
-
-    s = read(gradle)
-    print(f"patching {gradle.name}")
-
-    if is_kts:
-        s = ensure_android_block_kts(s)
-        s = ensure_dependency_kts(s)
+# 1) gradle-wrapper.properties -> Gradle 8.11+
+wrapper = ROOT / "gradle/wrapper/gradle-wrapper.properties"
+w = read(wrapper)
+if w:
+    w2 = re.sub(r"distributionUrl=.*",
+                "distributionUrl=https\\://services.gradle.org/distributions/gradle-8.11-all.zip",
+                w)
+    if w2 != w:
+        write(wrapper, w2)
+        print("[patch] gradle-wrapper.properties -> 8.11-all")
     else:
-        s = ensure_android_block_groovy(s)
-        s = ensure_dependency_groovy(s)
+        print("[ok] gradle-wrapper already 8.11+")
+else:
+    print("[warn] gradle-wrapper.properties not found (will be created by flutter create)")
 
-    # Импорт JavaVersion если нужен
-    first_line = s.splitlines()[0] if s else ""
-    if "JavaVersion" not in first_line:
-        s = "import org.gradle.api.JavaVersion\n" + s
+# Определяем groovy/kts
+app_gradle_groovy = ROOT / "app/build.gradle"
+app_gradle_kts    = ROOT / "app/build.gradle.kts"
+is_kts = app_gradle_kts.exists()
+app_gradle = app_gradle_kts if is_kts else app_gradle_groovy
 
-    write(gradle, s)
-    print("✅ desugaring enabled + dependency added precisely")
+g = read(app_gradle)
+if not g:
+    print(f"[warn] {app_gradle} not found yet. Maybe first run flutter create?")
+    sys.exit(0)
 
-def main():
-    ensure_gradle_wrapper()
-    patch_app_gradle()
+# 2) Включаем coreLibraryDesugaring и зависимость
+if is_kts:
+    if "isCoreLibraryDesugaringEnabled" not in g:
+        g = re.sub(r"android\s*{", "android {\n    compileOptions {\n        sourceCompatibility = JavaVersion.VERSION_17\n        targetCompatibility = JavaVersion.VERSION_17\n        isCoreLibraryDesugaringEnabled = true\n    }\n", g, count=1)
+    if "kotlinOptions" not in g:
+        g = g.replace("android {", "android {\n    kotlinOptions { jvmTarget = \"17\" }\n", 1)
+    if "coreLibraryDesugaring(" not in g:
+        g = re.sub(r"dependencies\s*{",
+                   "dependencies {\n    coreLibraryDesugaring(\"com.android.tools:desugar_jdk_libs:2.0.4\")",
+                   g, count=1)
+else:
+    if "coreLibraryDesugaringEnabled true" not in g:
+        # compileOptions + desugaring
+        if "compileOptions" not in g:
+            g = re.sub(r"android\s*{", "android {\n    compileOptions {\n        sourceCompatibility JavaVersion.VERSION_17\n        targetCompatibility JavaVersion.VERSION_17\n        coreLibraryDesugaringEnabled true\n    }\n", g, count=1)
+        else:
+            g = g.replace("compileOptions {", "compileOptions {\n        sourceCompatibility JavaVersion.VERSION_17\n        targetCompatibility JavaVersion.VERSION_17\n        coreLibraryDesugaringEnabled true", 1)
+    if "kotlinOptions" not in g:
+        g = g.replace("android {", "android {\n    kotlinOptions { jvmTarget = '17' }\n", 1)
+    if "coreLibraryDesugaring" not in g:
+        g = re.sub(r"dependencies\s*{",
+                   "dependencies {\n    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.0.4'",
+                   g, count=1)
 
-if __name__ == "__main__":
-    sys.exit(main())
+write(app_gradle, g)
+print(f"[patch] {app_gradle.name}: Java17 + desugaring ensured")
