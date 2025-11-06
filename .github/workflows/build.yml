@@ -42,17 +42,18 @@ jobs:
       - name: Flutter doctor
         run: flutter doctor -v
 
-      - name: Ensure fresh Android wrapper
+      - name: Ensure Flutter Android wrapper
         working-directory: ${{ env.WORKDIR }}
         run: |
-          rm -rf android
-          flutter create --platforms=android .
+          if [ ! -d "android" ]; then
+            flutter create --platforms=android .
+          fi
 
       - name: Pub get
         working-directory: ${{ env.WORKDIR }}
         run: flutter pub get
 
-      - name: Patch Android (Gradle+Manifest)
+      - name: Patch Android (pin AGP/Kotlin + Gradle app + Manifest)
         run: |
           python3 tools/patch_android.py "$WORKDIR"
 
@@ -79,8 +80,8 @@ jobs:
           mkdir -p diag
           find . -path "*/build/reports/problems/problems-report.html" -print -exec cp --parents {} diag/ \; || true
           find android/app/build -name "*AndroidManifest*.xml" -print -exec cp --parents {} diag/ \; || true
-          find android/app/build -name "*.log" -print -exec cp --parents {} diag/ \; || true
-          cp -a android/settings.gradle* android/build.gradle* android/app/build.gradle* diag/ 2>/dev/null || true
+          find android/app -maxdepth 1 -name "build.gradle*" -print -exec cp --parents {} diag/ \; || true
+          find android -maxdepth 1 -name "settings.gradle*" -print -exec cp --parents {} diag/ \; || true
           (cd diag && zip -r ../gradle-diagnostics.zip .) || true
 
       - name: Upload diagnostics
