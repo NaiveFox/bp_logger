@@ -53,32 +53,10 @@ jobs:
         working-directory: ${{ env.WORKDIR }}
         run: flutter pub get
 
-      - name: Patch Gradle/Kotlin/Desugaring + Settings (Groovy/KTS)
+      # Нежный патч: только android/app/*, без смены версий плагинов
+      - name: Patch Android module for desugaring
         run: |
           python3 tools/patch_gradle.py "$WORKDIR"
-
-      - name: Print Gradle files (debug)
-        working-directory: ${{ env.WORKDIR }}
-        run: |
-          echo "== settings.gradle ==" && (cat android/settings.gradle 2>/dev/null || true)
-          echo "== settings.gradle.kts ==" && (cat android/settings.gradle.kts 2>/dev/null || true)
-          echo "== build.gradle ==" && (cat android/build.gradle 2>/dev/null || true)
-          echo "== build.gradle.kts ==" && (cat android/build.gradle.kts 2>/dev/null || true)
-          echo "== app/build.gradle ==" && (cat android/app/build.gradle 2>/dev/null || true)
-          echo "== app/build.gradle.kts ==" && (cat android/app/build.gradle.kts 2>/dev/null || true)
-
-      - name: Verify desugaring wired (Groovy/KTS)
-        working-directory: ${{ env.WORKDIR }}
-        shell: bash
-        run: |
-          set -e
-          if [ -f android/app/build.gradle ]; then
-            grep -q 'coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:' android/app/build.gradle
-          elif [ -f android/app/build.gradle.kts ]; then
-            grep -q 'coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:' android/app/build.gradle.kts
-          else
-            echo "::error ::Neither build.gradle nor build.gradle.kts found in android/app"; exit 1
-          fi
 
       - name: Build release APK
         working-directory: ${{ env.WORKDIR }}
