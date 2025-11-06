@@ -1,59 +1,62 @@
-name: Build Android APK
+name: build-android
 
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]
-    paths-ignore:
-      - '**/*.md'
-      - '**/*.txt'
+    tags:
+      - 'v*'
 
 jobs:
-  build-android:
+  android:
     runs-on: ubuntu-latest
-
-    env:
-      JAVA_VERSION: '17'
-      FLUTTER_CHANNEL: 'stable'
-      ANDROID_SDK_ROOT: /opt/android-sdk
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Java
+      - name: Set up Java 17 (Temurin)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: ${{ env.JAVA_VERSION }}
+          java-version: '17'
 
-      - name: Set up Flutter (${{ env.FLUTTER_CHANNEL }})
+      - name: Set up Flutter (stable)
         uses: subosito/flutter-action@v2
         with:
-          channel: ${{ env.FLUTTER_CHANNEL }}
+          channel: 'stable'
           cache: true
 
       - name: Flutter doctor (sanity)
-        run: |
-          flutter --version
-          flutter doctor -v
+        run: flutter doctor -v
 
-      - name: Bootstrap project (create android, copy app/, pub get)
-        run: bash tools/bootstrap_project.sh
+      # Всегда работаем в каталоге приложения
+      - name: Ensure Android wrapper under app/
+        working-directory: ./app
+        run: |
+          if [ ! -f "pubspec.yaml" ]; then
+            echo "::error ::pubspec.yaml not found in ./app"; exit 1;
+          fi
+          # Если нет android в app/ — создаём современную обёртку (v2 embedding по умолчанию)
+          if [ ! -d "android" ]; then
+            flutter create . --platforms=android --project-name bp_logger --org com.naivefox
+          fi
 
       - name: Patch Gradle for Java17/AGP8/desugaring
-        run: python3 tools/patch_gradle.py
+        run: |
+          python3 tools/patch_gradle.py app/android
+        shell: bash
 
       - name: Flutter pub get (final)
+        working-directory: ./app
         run: flutter pub get
 
       - name: Build release APK
-        run: flutter build apk --release --target=app/lib/main.dart
-    
+        working-directory: ./app
+        run: flutter build apk --release --target=lib/main.dart
 
       - name: Upload APK
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: bp_logger-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
+          name: app-release
+          path: app/build/app/outputs/flutter-apk/app-release.apk
