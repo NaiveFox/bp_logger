@@ -53,8 +53,7 @@ jobs:
         working-directory: ${{ env.WORKDIR }}
         run: flutter pub get
 
-      # Нежный патч: только android/app/*, без смены версий плагинов
-      - name: Patch Android module for desugaring
+      - name: Patch Android app Gradle (desugaring + Java17 + multidex + lint + packaging)
         run: |
           python3 tools/patch_gradle.py "$WORKDIR"
 
