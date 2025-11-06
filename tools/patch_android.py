@@ -2,11 +2,11 @@
 # -*- coding: utf-8 -*-
 
 """
-Жёсткая стабилизация сборки:
-- settings.gradle(.kts): пин плагинов на AGP 8.3.2 / Kotlin 1.9.24 + репозитории google/mavenCentral (+ Flutter tools уже есть)
-- gradle-wrapper.properties -> Gradle 8.6
-- app/build.gradle(.kts): Java 17, desugaring (2.0.4), multidex, packaging, lint (release не падает), namespace/appId
-- AndroidManifest: android:exported="true" у MAIN/LAUNCHER activity + meta flutterEmbedding=2
+Жёсткая стабилизация Flutter-обёртки:
+- settings.gradle.kts ПОЛНОСТЬЮ перезаписывается (AGP 8.3.2, Kotlin 1.9.24)
+- gradle-wrapper -> Gradle 8.6
+- app/build.gradle(.kts): Java 17 + desugaring + multidex + packaging + lint
+- AndroidManifest: android:exported="true" + meta flutterEmbedding=2
 """
 
 import sys, pathlib, re
@@ -19,36 +19,38 @@ MULTIDEX = "androidx.multidex:multidex:2.0.1"
 NAMESPACE = "com.example.bp_logger"
 
 def R(p): return p.read_text(encoding="utf-8", errors="ignore")
-def W(p, s): p.parent.mkdir(parents=True, exist_ok=True); p.write_text(s, encoding="utf-8")
+def W(p,s): p.parent.mkdir(parents=True, exist_ok=True); p.write_text(s, encoding="utf-8")
 
-def pin_settings(path: pathlib.Path):
-    # KTS
-    if path.with_suffix(".kts").exists():
-        f = path.with_suffix(".kts")
-        t = R(f)
-        # plugins { id("dev.flutter.flutter-plugin-loader") version "1.0.0"
-        #          id("com.android.application") version "8.x.x" apply false
-        #          id("org.jetbrains.kotlin.android") version "2.x.x" apply false }
-        t = re.sub(r'id\("com\.android\.application"\)\s+version\s*".*?"',
-                   f'id("com.android.application") version "{AGP}"', t)
-        t = re.sub(r'id\("org\.jetbrains\.kotlin\.android"\)\s+version\s*".*?"',
-                   f'id("org.jetbrains.kotlin.android") version "{KOTLIN}"', t)
-        # убедимся в репозиториях
-        if "repositories {" in t and "mavenCentral()" not in t:
-            t = t.replace("repositories {", "repositories {\n        mavenCentral()")
-        W(f, t)
-        return
-    # Groovy
-    if path.exists():
-        f = path
-        t = R(f)
-        t = re.sub(r"id 'com\.android\.application' version '.*?'", 
-                   f"id 'com.android.application' version '{AGP}'", t)
-        t = re.sub(r"id 'org\.jetbrains\.kotlin\.android' version '.*?'", 
-                   f"id 'org.jetbrains.kotlin.android' version '{KOTLIN}'", t)
-        if "repositories {" in t and "mavenCentral()" not in t:
-            t = t.replace("repositories {", "repositories {\n        mavenCentral()")
-        W(f, t)
+def force_settings_kts(app: pathlib.Path):
+    f = app / "android/settings.gradle.kts"
+    content = f"""pluginManagement {{
+    val flutterSdkPath =
+        run {{
+            val properties = java.util.Properties()
+            file("local.properties").inputStream().use {{ properties.load(it) }}
+            val flutterSdkPath = properties.getProperty("flutter.sdk")
+            require(flutterSdkPath != null) {{ "flutter.sdk not set in local.properties" }}
+            flutterSdkPath
+        }}
+
+    includeBuild("$flutterSdkPath/packages/flutter_tools/gradle")
+
+    repositories {{
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }}
+}}
+
+plugins {{
+    id("dev.flutter.flutter-plugin-loader") version "1.0.0"
+    id("com.android.application") version "{AGP}" apply false
+    id("org.jetbrains.kotlin.android") version "{KOTLIN}" apply false
+}}
+
+include(":app")
+"""
+    W(f, content)
 
 def set_wrapper(app: pathlib.Path):
     prop = app/"android/gradle/wrapper/gradle-wrapper.properties"
@@ -93,116 +95,125 @@ def patch_manifest(app: pathlib.Path):
 def patch_app_gradle(app: pathlib.Path):
     g = app/"android/app/build.gradle"
     k = app/"android/app/build.gradle.kts"
-    if k.exists(): # KTS
-        t = R(k)
-        if "namespace" not in t: t = re.sub(r"android\s*\{", f'android {{\n    namespace = "{NAMESPACE}"', t, 1)
-        if "applicationId" not in t: t = re.sub(r"defaultConfig\s*\{", f'defaultConfig {{\n        applicationId = "{NAMESPACE}"', t, 1)
-        if "compileOptions" in t:
-            t = re.sub(r"compileOptions\s*\{[\s\S]*?\}", 
-                       """compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
-        isCoreLibraryDesugaringEnabled = true
-    }""", t, 1)
-        else:
-            t = re.sub(r"android\s*\{", """android {
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
-        isCoreLibraryDesugaringEnabled = true
-    }""", t, 1)
-        if "kotlinOptions" in t:
-            t = re.sub(r"kotlinOptions\s*\{[\s\S]*?\}", 'kotlinOptions {\n        jvmTarget = "17"\n    }', t, 1)
-        else:
-            t = re.sub(r"android\s*\{", """android {
-    kotlinOptions { jvmTarget = "17" }""", t, 1)
-        if "multiDexEnabled" not in t:
-            t = re.sub(r"defaultConfig\s*\{", "defaultConfig {\n        multiDexEnabled = true", t, 1)
-        # lint
-        if re.search(r"\blint\s*\{", t):
-            t = re.sub(r"lint\s*\{[\s\S]*?\}", "lint {\n        abortOnError = false\n        checkReleaseBuilds = false\n    }", t, 1)
-        else:
-            t = re.sub(r"android\s*\{", "android {\n    lint { abortOnError = false; checkReleaseBuilds = false }", t, 1)
-        # packaging
-        if re.search(r"\bpackaging\s*\{", t):
-            t = re.sub(r"packaging\s*\{[\s\S]*?\}", 
-                       """packaging {
-        resources { excludes += setOf("META-INF/AL2.0","META-INF/LGPL2.1","META-INF/LICENSE*","META-INF/NOTICE*","META-INF/DEPENDENCIES") }
-    }""", t, 1)
-        else:
-            t = re.sub(r"android\s*\{", """android {
-    packaging { resources { excludes += setOf("META-INF/AL2.0","META-INF/LGPL2.1","META-INF/LICENSE*","META-INF/NOTICE*","META-INF/DEPENDENCIES") } }""", t, 1)
-        # deps
-        if "coreLibraryDesugaring(" not in t:
-            t = re.sub(r"dependencies\s*\{", f"""dependencies {{
-    coreLibraryDesugaring("{DESUGAR}") """, t, 1)
-        if "androidx.multidex:multidex" not in t:
-            t = re.sub(r"dependencies\s*\{", f"""dependencies {{
-    implementation("{MULTIDEX}") """, t, 1)
-        W(k, t); return
-
-    # Groovy
-    if g.exists():
-        t = R(g)
-        if "namespace" not in t: t = re.sub(r"android\s*\{", f'android {{\n    namespace "{NAMESPACE}"', t, 1)
-        if "applicationId" not in t: t = re.sub(r"defaultConfig\s*\{", f'defaultConfig {{\n        applicationId "{NAMESPACE}"', t, 1)
-        if "compileOptions" in t:
-            t = re.sub(r"compileOptions\s*\{[\s\S]*?\}",
-                       """compileOptions {
+    def apply_groovy(txt: str) -> str:
+        if "namespace" not in txt:
+            txt = re.sub(r"android\s*\{", f'android {{\n    namespace "{NAMESPACE}"', txt, 1)
+        if "applicationId" not in txt:
+            txt = re.sub(r"defaultConfig\s*\{", f'defaultConfig {{\n        applicationId "{NAMESPACE}"', txt, 1)
+        # compileOptions + desugaring
+        if "compileOptions" in txt:
+            txt = re.sub(r"compileOptions\s*\{[\s\S]*?\}",
+                         """compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
         coreLibraryDesugaringEnabled true
-    }""", t, 1)
+    }""", txt, 1)
         else:
-            t = re.sub(r"android\s*\{", """android {
+            txt = re.sub(r"android\s*\{", """android {
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
         coreLibraryDesugaringEnabled true
-    }""", t, 1)
-        if "kotlinOptions" in t:
-            t = re.sub(r'kotlinOptions\s*\{[\s\S]*?\}', 'kotlinOptions {\n        jvmTarget = "17"\n    }', t, 1)
+    }""", txt, 1)
+        # kotlinOptions
+        if "kotlinOptions" in txt:
+            txt = re.sub(r'kotlinOptions\s*\{[\s\S]*?\}', 'kotlinOptions {\n        jvmTarget = "17"\n    }', txt, 1)
         else:
-            t = re.sub(r"android\s*\{", """android {
-    kotlinOptions { jvmTarget = "17" }""", t, 1)
-        if "multiDexEnabled" not in t:
-            t = re.sub(r"defaultConfig\s*\{", "defaultConfig {\n        multiDexEnabled true", t, 1)
+            txt = re.sub(r"android\s*\{", """android {
+    kotlinOptions { jvmTarget = "17" }""", txt, 1)
+        # multidex
+        if "multiDexEnabled true" not in txt:
+            txt = re.sub(r"defaultConfig\s*\{", "defaultConfig {\n        multiDexEnabled true", txt, 1)
         # lint
-        if "lintOptions" in t:
-            t = re.sub(r"lintOptions\s*\{[\s\S]*?\}", "lintOptions {\n        abortOnError false\n        checkReleaseBuilds false\n    }", t, 1)
+        if "lintOptions" in txt:
+            txt = re.sub(r"lintOptions\s*\{[\s\S]*?\}", "lintOptions {\n        abortOnError false\n        checkReleaseBuilds false\n    }", txt, 1)
         else:
-            t = re.sub(r"android\s*\{", "android {\n    lintOptions { abortOnError false; checkReleaseBuilds false }", t, 1)
+            txt = re.sub(r"android\s*\{", "android {\n    lintOptions { abortOnError false; checkReleaseBuilds false }", txt, 1)
         # packaging
-        if "packagingOptions" in t:
-            t = re.sub(r"packagingOptions\s*\{[\s\S]*?\}", 
-                       """packagingOptions {
+        if "packagingOptions" in txt:
+            txt = re.sub(r"packagingOptions\s*\{[\s\S]*?\}",
+                         """packagingOptions {
         resources { excludes += ["META-INF/AL2.0","META-INF/LGPL2.1","META-INF/LICENSE*","META-INF/NOTICE*","META-INF/DEPENDENCIES"] }
-    }""", t, 1)
+    }""", txt, 1)
         else:
-            t = re.sub(r"android\s*\{", """android {
-    packagingOptions { resources { excludes += ["META-INF/AL2.0","META-INF/LGPL2.1","META-INF/LICENSE*","META-INF/NOTICE*","META-INF/DEPENDENCIES"] } }""", t, 1)
+            txt = re.sub(r"android\s*\{", """android {
+    packagingOptions { resources { excludes += ["META-INF/AL2.0","META-INF/LGPL2.1","META-INF/LICENSE*","META-INF/NOTICE*","META-INF/DEPENDENCIES"] } }""", txt, 1)
         # deps
-        if "coreLibraryDesugaring" not in t:
-            t = re.sub(r"dependencies\s*\{", f"""dependencies {{
-    coreLibraryDesugaring "{DESUGAR}" """, t, 1)
-        if "androidx.multidex:multidex" not in t:
-            t = re.sub(r"dependencies\s*\{", f"""dependencies {{
-    implementation "{MULTIDEX}" """, t, 1)
-        W(g, t)
+        if "coreLibraryDesugaring" not in txt:
+            txt = re.sub(r"dependencies\s*\{", f"""dependencies {{
+    coreLibraryDesugaring "{DESUGAR}" """, txt, 1)
+        if "androidx.multidex:multidex" not in txt:
+            txt = re.sub(r"dependencies\s*\{", f"""dependencies {{
+    implementation "{MULTIDEX}" """, txt, 1)
+        return txt
+
+    def apply_kts(txt: str) -> str:
+        if "namespace" not in txt:
+            txt = re.sub(r"android\s*\{", f'android {{\n    namespace = "{NAMESPACE}"', txt, 1)
+        if "applicationId" not in txt:
+            txt = re.sub(r"defaultConfig\s*\{", f'defaultConfig {{\n        applicationId = "{NAMESPACE}"', txt, 1)
+        if "compileOptions" in txt:
+            txt = re.sub(r"compileOptions\s*\{[\s\S]*?\}",
+                         """compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+        isCoreLibraryDesugaringEnabled = true
+    }""", txt, 1)
+        else:
+            txt = re.sub(r"android\s*\{", """android {
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+        isCoreLibraryDesugaringEnabled = true
+    }""", txt, 1)
+        if "kotlinOptions" in txt:
+            txt = re.sub(r'kotlinOptions\s*\{[\s\S]*?\}', 'kotlinOptions {\n        jvmTarget = "17"\n    }', txt, 1)
+        else:
+            txt = re.sub(r"android\s*\{", """android {
+    kotlinOptions { jvmTarget = "17" }""", txt, 1)
+        if "multiDexEnabled" not in txt:
+            txt = re.sub(r"defaultConfig\s*\{", "defaultConfig {\n        multiDexEnabled = true", txt, 1)
+        if re.search(r"\blint\s*\{", txt):
+            txt = re.sub(r"lint\s*\{[\s\S]*?\}", "lint {\n        abortOnError = false\n        checkReleaseBuilds = false\n    }", txt, 1)
+        else:
+            txt = re.sub(r"android\s*\{", "android {\n    lint { abortOnError = false; checkReleaseBuilds = false }", txt, 1)
+        if re.search(r"\bpackaging\s*\{", txt):
+            txt = re.sub(r"packaging\s*\{[\s\S]*?\}",
+                         """packaging {
+        resources { excludes += setOf("META-INF/AL2.0","META-INF/LGPL2.1","META-INF/LICENSE*","META-INF/NOTICE*","META-INF/DEPENDENCIES") }
+    }""", txt, 1)
+        else:
+            txt = re.sub(r"android\s*\{", """android {
+    packaging { resources { excludes += setOf("META-INF/AL2.0","META-INF/LGPL2.1","META-INF/LICENSE*","META-INF/NOTICE*","META-INF/DEPENDENCIES") } }""", txt, 1)
+        if "coreLibraryDesugaring(" not in txt:
+            txt = re.sub(r"dependencies\s*\{", f"""dependencies {{
+    coreLibraryDesugaring("{DESUGAR}") """, txt, 1)
+        if "androidx.multidex:multidex" not in txt:
+            txt = re.sub(r"dependencies\s*\{", f"""dependencies {{
+    implementation("{MULTIDEX}") """, txt, 1)
+        return txt
+
+    if k.exists():
+        W(k, apply_kts(R(k))); return
+    if g.exists():
+        W(g, apply_groovy(R(g))); return
+    # если внезапно нет — создаём KTS-вариант
+    W(k, apply_kts("""plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
+android { compileSdk = 34; defaultConfig {} } dependencies {}"""))
 
 def main():
     if len(sys.argv) < 2:
         print("Usage: python3 tools/patch_android.py app_dir", file=sys.stderr); sys.exit(1)
     app = pathlib.Path(sys.argv[1]).resolve()
-    # settings pin
-    pin_settings(app/"android/settings.gradle")
-    # gradle wrapper
+    # 1) settings.gradle.kts — ПОЛНАЯ замена (пин версий)
+    force_settings_kts(app)
+    # 2) gradle wrapper -> 8.6
     set_wrapper(app)
-    # manifest
+    # 3) Manifest
     patch_manifest(app)
-    # app gradle
+    # 4) app/build.gradle(.kts)
     patch_app_gradle(app)
-    print(f"✅ Pinned AGP {AGP} / Kotlin {KOTLIN} / Gradle {GRADLE} and patched app/manifest.")
+    print(f"✅ settings.gradle.kts pinned to AGP {AGP}, Kotlin {KOTLIN}; wrapper {GRADLE}; app/manifest patched.")
 
 if __name__ == "__main__":
     main()
