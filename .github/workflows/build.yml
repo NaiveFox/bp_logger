@@ -49,10 +49,26 @@ jobs:
         run: |
           set -e
           M=android/app/src/main/AndroidManifest.xml
-          [ -f "$M" ] || { echo "::error ::Manifest not found"; cat android/app/src/main/AndroidManifest.xml || true; exit 1; }
+          if [ ! -f "$M" ]; then
+            echo "::error ::Manifest not found at $M"; exit 1;
+          fi
+          # убрать наследие v1, если промелькнёт
           sed -i '/android:name="\${applicationName}"/d' "$M" || true
-          grep -q 'flutterEmbedding' "$M" || \
-          awk 'BEGIN{ins=0}/<application[^>]*>/ && !ins{print;print "        <meta-data android:name=\"flutterEmbedding\" android:value=\"2\" />";ins=1;next}{print}' "$M" > "$M.tmp" && mv "$M.tmp" "$M"
+
+          # корректно вставить meta-data ТОЛЬКО если её ещё нет
+          if ! grep -q 'flutterEmbedding' "$M"; then
+            awk '
+              BEGIN{ins=0}
+              /<application[^>]*>/ && ins==0 {
+                print
+                print "        <meta-data android:name=\"flutterEmbedding\" android:value=\"2\" />"
+                ins=1
+                next
+              }
+              {print}
+            ' "$M" > "$M.tmp"
+            mv "$M.tmp" "$M"
+          fi
 
       - name: Flutter pub get
         working-directory: ./app
